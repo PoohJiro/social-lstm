@@ -371,7 +371,7 @@ def train(args):
                 x, y, d , numPedsList, PedsList ,target_ids = dataloader.next_batch()
 
                 if dataset_pointer_ins is not dataloader.dataset_pointer:
-                    if dataloader.dataset_pointer is not 0:
+                    if dataloader.dataset_pointer != 0:
                         print('Finished prosessed file : ', dataloader.get_file_name(-1),' Avarage error : ', err_epoch/num_of_batch)
                         num_of_batch = 0
                         epoch_result.append(results)
@@ -487,6 +487,70 @@ def train(args):
         dataloader.switch_to_dataset_type(load_data=False)
         create_directories(plot_directory, [plot_train_file_directory])
         dataloader.write_to_plot_file(all_epoch_results[len(all_epoch_results)-1], os.path.join(plot_directory, plot_train_file_directory))
+        for batch in range(dataloader.num_batches):
+                x, y, d, numPedsList, PedsList, target_ids = dataloader.next_batch()
+
+                for sequence in range(dataloader.batch_size):
+                    x_seq, _, d_seq, numPedsList_seq, PedsList_seq = x[sequence], y[sequence], d[sequence], numPedsList[sequence], PedsList[sequence]
+                    target_id = target_ids[sequence]
+
+                    folder_name = dataloader.get_directory_name_with_pointer(d_seq)
+                    dataset_data = dataloader.get_dataset_dimension(folder_name)
+
+                    x_seq, lookup_seq = dataloader.convert_proper_array(x_seq, numPedsList_seq, PedsList_seq)
+                    target_id_values = x_seq[0][lookup_seq[target_id], 0:2]
+
+                    x_seq, first_values_dict = vectorize_seq(x_seq, PedsList_seq, lookup_seq)
+
+                    if args.use_cuda:
+                        x_seq = x_seq.cuda()
+
+                    numNodes = len(lookup_seq)
+
+                    hidden_states = Variable(torch.zeros(numNodes, args.rnn_size))
+                    cell_states = Variable(torch.zeros(numNodes, args.rnn_size))
+
+                    if args.use_cuda:
+                        hidden_states = hidden_states.cuda()
+                        cell_states = cell_states.cuda()
+
+                    outputs, _, _ = net(x_seq[:-1], hidden_states, cell_states, PedsList_seq[:-1], numPedsList_seq, dataloader, lookup_seq)
+
+                    mux, muy, sx, sy, corr = getCoef(outputs)
+                    next_x, next_y = sample_gaussian_2d(mux.data, muy.data, sx.data, sy.data, corr.data, PedsList_seq[-1], lookup_seq)
+                    next_vals = torch.FloatTensor(1, numNodes, 2)
+                    next_vals[:, :, 0] = next_x
+                    next_vals[:, :, 1] = next_y
+
+                    err = get_mean_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, lookup_seq)
+                    f_err = get_final_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, lookup_seq)
+
+                    err_epoch += err
+                    f_err_epoch += f_err
+                    num_of_batch += 1
+
+                    results.append((dataset_data, err, f_err))
+
+        if num_of_batch != 0:
+            err_epoch /= num_of_batch
+            f_err_epoch /= num_of_batch
+
+            epoch_result.append(results)
+            all_epoch_results.append(epoch_result)
+
+            print('(epoch {}), validation dataset error: {:.3f}, final error: {:.3f}'.format(epoch, err_epoch, f_err_epoch))
+            log_file.write("Epoch: "+str(epoch)+' error: '+str(err_epoch)+' final_error: '+str(f_err_epoch)+'\n')
+
+            # Save the model if best
+            if err_epoch < smallest_err_val_data:
+                smallest_err_val_data = err_epoch
+                best_epoch_val_data = epoch
+                print('Best epoch till now for dataset', best_epoch_val_data, 'with error', smallest_err_val_data)
+                torch.save({
+                    'epoch': epoch,
+                    'state_dict': net.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }, checkpoint_path(epoch))
 
     # Close logging files
     log_file.close()
