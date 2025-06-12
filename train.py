@@ -526,14 +526,16 @@ def train(args):
 
                     # <---------------------- Experimental block revert----------------------->
                     # Revert the calculated coordinates back to original space:
-                    # 1) Convert point from vectors to absolute coordinates
-                    # 2) Rotate all trajectories in reverse angle
-                    # 3) Translate all trajectories back to original space by adding the first frame value of target ped trajectory
+                    # 1) Convert point from vectors to absolute coordinates(ベクトルから絶対座標に変換)
+                    # 2) Rotate all trajectories in reverse angle(すべての軌道を逆回転)
+                    # 3) Translate all trajectories back to original space by adding the first frame value of target ped trajectory(すべての軌道を元の空間に平行移動（ターゲット歩行者の最初のフレームの位置を加算）)
                     
-                    # *It works without problems which mean that it reverts a trajectory back completely
+                    # *It works without problems which mean that it reverts a trajectory back completely(問題なく動作することが確認されており、軌道を完全に元に戻すことができる
+#
+# 想定される問題：)
                     
-                    # Possible problems:
-                    # *Algoritmical errors caused by first experimental block -> High possiblity
+                    # Possible problems(想定される問題：):
+                    # *Algoritmical errors caused by first experimental block -> High possiblity(最初の実験ブロックによるアルゴリズム的な誤差の可能性 → 高い可能性)
                     # <------------------------------------------------------------------------>
 
                     # ret_x_seq = revert_seq(ret_x_seq, PedsList_seq, lookup_seq, first_values_dict)
