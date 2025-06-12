@@ -243,8 +243,8 @@ def train(args):
             end = time.time()
             loss_batch = loss_batch / dataloader.batch_size
             loss_epoch += loss_batch
-
-            print('{}/{} (epoch {}), train_loss = {:.3f}, time/batch = {:.3f}'.format(epoch * dataloader.num_batches + batch,
+            if batch % 10 == 0:
+                print('{}/{} (epoch {}), train_loss = {:.3f}, time/batch = {:.3f}'.format(epoch * dataloader.num_batches + batch,
                                                                                     args.num_epochs * dataloader.num_batches,
                                                                                     epoch,
                                                                                     loss_batch, end - start))
@@ -338,8 +338,8 @@ def train(args):
                 if err_epoch<smallest_err_val:
                     smallest_err_val = err_epoch
                     best_err_epoch_val = epoch
-
-                print('(epoch {}), valid_loss = {:.3f}, valid_err = {:.3f}'.format(epoch, loss_epoch, err_epoch))
+                if (batch + 1) % 10 == 0:
+                    print('(epoch {}), valid_loss = {:.3f}, valid_err = {:.3f}'.format(epoch, loss_epoch, err_epoch))
                 print('Best epoch', best_epoch_val, 'Best validation loss', best_val_loss, 'Best error epoch',best_err_epoch_val, 'Best error', smallest_err_val)
                 log_file_curve.write("Validation epoch: "+str(epoch)+" loss: "+str(loss_epoch)+" err: "+str(err_epoch)+'\n')
 
@@ -423,7 +423,8 @@ def train(args):
                     loss_batch += loss.item()
                     err_batch += err
                     f_err_batch += f_err
-                    print('Current file : ', dataloader.get_file_name(0),' Batch : ', batch+1, ' Sequence: ', sequence+1, ' Sequence mean error: ', err,' Sequence final error: ',f_err,' time: ', end - start)
+                    if (batch + 1) % 10 == 0:  # 10バッチに1回だけ、シーケンス1だけ表示
+                        print('Current file : ', dataloader.get_file_name(0),' Batch : ', batch+1, ' Sequence: ', sequence+1, ' ADE: ', err,' FDE: ',f_err,' time: ', end - start)
                     results.append((orig_x_seq.data.cpu().numpy(), ret_x_seq.data.cpu().numpy(), PedsList_seq, lookup_seq, dataloader.get_frame_sequence(args.seq_length), target_id))
 
                 loss_batch = loss_batch / dataloader.batch_size
@@ -450,8 +451,8 @@ def train(args):
                 if err_epoch<smallest_err_val_data:
                     smallest_err_val_data = err_epoch
                     best_err_epoch_val_data = epoch
-
-                print('(epoch {}), valid_loss = {:.3f}, valid_mean_err = {:.3f}, valid_final_err = {:.3f}'.format(epoch, loss_epoch, err_epoch, f_err_epoch))
+                if (batch + 1) % 10 == 0:
+                    print('(epoch {}), valid_loss = {:.3f}, valid_mean_err = {:.3f}, valid_final_err = {:.3f}'.format(epoch, loss_epoch, err_epoch, f_err_epoch))
                 print('Best epoch', best_epoch_val_data, 'Best validation loss', best_val_data_loss, 'Best error epoch',best_err_epoch_val_data, 'Best error', smallest_err_val_data)
                 log_file_curve.write("Validation dataset epoch: "+str(epoch)+" loss: "+str(loss_epoch)+" mean_err: "+str(err_epoch)+'final_err: '+str(f_err_epoch)+'\n')
 
@@ -522,8 +523,8 @@ def train(args):
                     next_vals[:, :, 0] = next_x
                     next_vals[:, :, 1] = next_y
 
-                    err = get_mean_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, lookup_seq)
-                    f_err = get_final_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, lookup_seq)
+                    err = get_mean_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, look_up)
+                    f_err = get_final_error(next_vals, x_seq[-1].data[None, :, :], [PedsList_seq[-1]], [PedsList_seq[-1]], args.use_cuda, look_up)
 
                     err_epoch += err
                     f_err_epoch += f_err
