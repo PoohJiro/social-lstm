@@ -330,8 +330,8 @@ def train(args):
             loss_batch = loss_batch / dataloader.batch_size
             loss_epoch += loss_batch
             num_batch+=1
-
-            print('{}/{} (epoch {}), train_loss = {:.3f}, time/batch = {:.3f}'.format(epoch * dataloader.num_batches + batch,
+            if epoch%10==0:
+                print('{}/{} (epoch {}), train_loss = {:.3f}, time/batch = {:.3f}'.format(epoch * dataloader.num_batches + batch,
                                                                                     args.num_epochs * dataloader.num_batches,
                                                                                     epoch,
                                                                                     loss_batch, end - start))
@@ -435,8 +435,8 @@ def train(args):
                 if err_epoch<smallest_err_val:
                     smallest_err_val = err_epoch
                     best_err_epoch_val = epoch
-
-                print('(epoch {}), valid_loss = {:.3f}, valid_err = {:.3f}'.format(epoch, loss_epoch, err_epoch))
+                if epoch%10==0:
+                    print('(epoch {}), valid_loss = {:.3f}, valid_err = {:.3f}'.format(epoch, loss_epoch, err_epoch))
                 print('Best epoch', best_epoch_val, 'Best validation loss', best_val_loss, 'Best error epoch',best_err_epoch_val, 'Best error', smallest_err_val)
                 log_file_curve.write("Validation epoch: "+str(epoch)+" loss: "+str(loss_epoch)+" err: "+str(err_epoch)+'\n')
 
@@ -512,11 +512,11 @@ def train(args):
                     x_seq, first_values_dict = vectorize_seq(x_seq, PedsList_seq, lookup_seq)
 
                     # <---------------------- Experimental block ----------------------->
-                    # x_seq = translate(x_seq, PedsList_seq, lookup_seq ,target_id_values)
-                    # angle = angle_between(reference_point, (x_seq[1][lookup_seq[target_id], 0].data.numpy(), x_seq[1][lookup_seq[target_id], 1].data.numpy()))
-                    # x_seq = rotate_traj_with_target_ped(x_seq, angle, PedsList_seq, lookup_seq)
-                    # grid_seq = getSequenceGridMask(x_seq, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
-                    # x_seq, first_values_dict = vectorize_seq(x_seq, PedsList_seq, lookup_seq)
+                    # x_seq = translate(x_seq, PedsList_seq, lookup_seq ,target_id_values):x_seq を target の位置に合わせて平行移動する
+                    # angle = angle_between(reference_point, (x_seq[1][lookup_seq[target_id], 0].data.numpy(), x_seq[1][lookup_seq[target_id], 1].data.numpy())):基準点と target 歩行者の2番目のフレームにおける位置との間の角度を計算する
+                    # x_seq = rotate_traj_with_target_ped(x_seq, angle, PedsList_seq, lookup_seq)target :歩行者の向きに合わせて軌道全体を回転させる
+                    # grid_seq = getSequenceGridMask(x_seq, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda):各歩行者の周囲をグリッドでマスクし、空間的な情報を取得する
+                    # x_seq, first_values_dict = vectorize_seq(x_seq, PedsList_seq, lookup_seq):ベクトル化された軌道（相対位置）と、元の最初の位置の辞書を作成する
 
                     #sample predicted points from model
                     ret_x_seq, loss = sample_validation_data(x_seq, PedsList_seq, grid_seq, args, net, lookup_seq, numPedsList_seq, dataloader)
@@ -578,8 +578,8 @@ def train(args):
                 if avarage_err<smallest_err_val_data:
                     smallest_err_val_data = avarage_err
                     best_err_epoch_val_data = epoch
-
-                print('(epoch {}), valid_loss = {:.3f}, valid_mean_err = {:.3f}, valid_final_err = {:.3f}'.format(epoch, loss_epoch, err_epoch, f_err_epoch))
+                if epoch%10==0:
+                    print('(epoch {}), valid_loss = {:.3f}, ADE= {:.3f}, FDE = {:.3f}'.format(epoch, loss_epoch, err_epoch, f_err_epoch))
                 print('Best epoch', best_epoch_val_data, 'Best validation loss', best_val_data_loss, 'Best error epoch',best_err_epoch_val_data, 'Best error', smallest_err_val_data)
                 log_file_curve.write("Validation dataset epoch: "+str(epoch)+" loss: "+str(loss_epoch)+" mean_err: "+str(err_epoch)+'final_err: '+str(f_err_epoch)+'\n')
 
