@@ -117,7 +117,7 @@ def main():
         checkpoint_path = os.path.join(save_directory, save_tar_name+str(sample_args.epoch)+'.tar')
         if os.path.isfile(checkpoint_path):
             print('Loading checkpoint')
-            checkpoint = torch.load(checkpoint_path)
+            checkpoint = torch.load(checkpoint_path, map_location=device)
             model_epoch = checkpoint['epoch']
             net.load_state_dict(checkpoint['state_dict'])
             print('Loaded checkpoint at epoch', model_epoch)
@@ -141,6 +141,16 @@ def main():
 
             # Get the sequence
             x_seq, d_seq ,numPedsList_seq, PedsList_seq, target_id = x[0], d[0], numPedsList[0], PedsList[0], target_ids[0]
+            
+            # Fix target_id if it's an array/list
+            if isinstance(target_id, (list, np.ndarray)):
+                target_id = target_id[0] if len(target_id) > 0 else target_id
+            elif hasattr(target_id, 'item'):  # PyTorch tensor
+                target_id = target_id.item()
+            
+            # Debug print
+            print(f"Processing target_id: {target_id} (type: {type(target_id)})")
+            
             dataloader.clean_test_data(x_seq, target_id, sample_args.obs_length, sample_args.pred_length)
             dataloader.clean_ped_list(x_seq, PedsList_seq, target_id, sample_args.obs_length, sample_args.pred_length)
 
