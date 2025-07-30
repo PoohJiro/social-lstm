@@ -219,15 +219,14 @@ class DataLoader():
                 # if validation mode, read validation file to pandas dataframe and process
                 if self.additional_validation:
                     df = pd.read_csv(directory, dtype={'frame_num':'int','ped_id':'int' }, delimiter = ' ',  header=None, names=column_names)
-                    self.target_ids = np.array(df.drop_duplicates(subset={'ped_id'}, keep='first', inplace=False)['ped_id'])
+                    self.target_ids = np.array(df.drop_duplicates(subset=['ped_id'], keep='first', inplace=False)['ped_id'])
 
                 # if test mode, read test file to pandas dataframe and process
                 else:
                     column_names = ['frame_num','ped_id','y','x']
                     df = pd.read_csv(directory, dtype={'frame_num':'int','ped_id':'int' }, delimiter = ' ',  header=None, names=column_names, converters = {c:lambda x: float('nan') if x == '?' else float(x) for c in ['y','x']})
-                    self.target_ids = np.array(df[df['y'].isnull()].drop_duplicates(subset=['ped_id'], keep='first', inplace=False))
+                    self.target_ids = np.array(df[df['y'].isnull()].drop_duplicates(subset=['ped_id'], keep='first', inplace=False)['ped_id'])
 
-                    
             # convert pandas -> numpy array
             data = np.array(df)
 

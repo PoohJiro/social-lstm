@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from torch.autograd import Variable
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import argparse
 import os
 import time
@@ -157,7 +157,7 @@ def train(args):
     # model creation
     net = SocialModel(args)
     if args.use_cuda:
-        net = net.cuda()
+        net = net.to(device)
 
     #optimizer = torch.optim.RMSprop(net.parameters(), lr=args.learning_rate)
     optimizer = torch.optim.Adagrad(net.parameters(), weight_decay=args.lambda_param)
@@ -392,17 +392,17 @@ def train(args):
 
 
                     if args.use_cuda:                    
-                        x_seq = x_seq.cuda()
+                        x_seq = x_seq.to(device)
 
                     #number of peds in this sequence per frame
                     numNodes = len(lookup_seq)
 
                     hidden_states = Variable(torch.zeros(numNodes, args.rnn_size))
                     if args.use_cuda:                    
-                        hidden_states = hidden_states.cuda()
+                        hidden_states = hidden_states.to(device)
                     cell_states = Variable(torch.zeros(numNodes, args.rnn_size))
                     if args.use_cuda:                    
-                        cell_states = cell_states.cuda()
+                        cell_states = cell_states.to(device)
 
                     # Forward prop
                     outputs, _, _ = net(x_seq[:-1], grid_seq[:-1], hidden_states, cell_states, PedsList_seq[:-1], numPedsList_seq , dataloader, lookup_seq)
@@ -509,8 +509,8 @@ def train(args):
                     grid_seq = getSequenceGridMask(x_seq, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
                     
                     if args.use_cuda:
-                        x_seq = x_seq.cuda()
-                        orig_x_seq = orig_x_seq.cuda()
+                        x_seq = x_seq.to(device)
+                        orig_x_seq = orig_x_seq.to(device)
 
                     #vectorize datapoints
                     x_seq, first_values_dict = vectorize_seq(x_seq, PedsList_seq, lookup_seq)
