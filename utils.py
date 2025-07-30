@@ -420,8 +420,17 @@ class DataLoader():
                 y_batch.append(seq_target_frame_data)
                 numPedsList_batch.append(seq_numPedsList)
                 PedsList_batch.append(seq_PedsList)
-                # get correct target ped id for the sequence
-                target_ids.append(self.target_ids[self.dataset_pointer][math.floor((self.frame_pointer)/self.seq_length)])
+                
+                # get correct target ped id for the sequence - ROOT CAUSE FIX
+                raw_target_id = self.target_ids[self.dataset_pointer][math.floor((self.frame_pointer)/self.seq_length)]
+                if isinstance(raw_target_id, (list, np.ndarray)):
+                    target_id = int(raw_target_id[0]) if len(raw_target_id) > 0 else 0
+                elif hasattr(raw_target_id, 'item'):
+                    target_id = int(raw_target_id.item())
+                else:
+                    target_id = int(raw_target_id)
+                target_ids.append(target_id)
+                
                 self.frame_pointer += self.seq_length
 
                 d.append(self.dataset_pointer)
@@ -479,8 +488,17 @@ class DataLoader():
                 y_batch.append(seq_target_frame_data)
                 numPedsList_batch.append(seq_numPedsList)
                 PedsList_batch.append(seq_PedsList)
-                # get correct target ped id for the sequence
-                target_ids.append(self.target_ids[self.dataset_pointer][math.floor((self.valid_frame_pointer)/self.seq_length)])
+                
+                # get correct target ped id for the sequence - ROOT CAUSE FIX
+                raw_target_id = self.target_ids[self.dataset_pointer][math.floor((self.valid_frame_pointer)/self.seq_length)]
+                if isinstance(raw_target_id, (list, np.ndarray)):
+                    target_id = int(raw_target_id[0]) if len(raw_target_id) > 0 else 0
+                elif hasattr(raw_target_id, 'item'):
+                    target_id = int(raw_target_id.item())
+                else:
+                    target_id = int(raw_target_id)
+                target_ids.append(target_id)
+                
                 self.valid_frame_pointer += self.seq_length
 
                 d.append(self.valid_dataset_pointer)
@@ -710,4 +728,3 @@ class DataLoader():
     def get_dataset_dimension(self, file_name):
         # return dataset dimension using dataset file name
         return self.dataset_dimensions[file_name]
-
