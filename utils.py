@@ -71,7 +71,7 @@ class DataLoader():
 
         # check validation dataset availibility and clip the reuqested number if it is bigger than available validation dataset
         if self.additional_validation:
-            if len(self.validation_dataset) is 0:
+            if len(self.validation_dataset) == 0:
                 print("There is no validation dataset.Aborted.")
                 self.additional_validation = False
             else:
@@ -597,10 +597,10 @@ class DataLoader():
 
     def get_file_name(self, offset=0, pointer_type = 'train'):
         #return file name of processing or pointing by dataset pointer
-        if pointer_type is 'train':
+        if pointer_type == 'train':
             return self.data_dirs[self.dataset_pointer+offset].split('/')[-1]
          
-        elif pointer_type is 'valid':
+        elif pointer_type == 'valid':
             return self.data_dirs[self.valid_dataset_pointer+offset].split('/')[-1]
 
     def create_folder_file_dict(self):
