@@ -58,7 +58,6 @@ class DataLoader():
         self.test_dataset = self.get_dataset_path(self.base_test_path, f_prefix)
         self.validation_dataset = self.get_dataset_path(self.base_validation_path, f_prefix)
 
-
         # if generate mode, use directly train base files
         if generate:
             self.train_dataset = [os.path.join(f_prefix, dataset[1:]) for dataset in base_train_dataset]
@@ -89,7 +88,6 @@ class DataLoader():
             else:
                 self.data_dirs = self.test_dataset
 
-
         self.infer = infer
         self.generate = generate
 
@@ -104,7 +102,6 @@ class DataLoader():
         self.test_data_dir = os.path.join(f_prefix, self.base_test_path)
         self.val_data_dir = os.path.join(f_prefix, self.base_validation_path)
 
-
         # Store the arguments
         self.batch_size = batch_size
         self.seq_length = seq_length
@@ -117,7 +114,6 @@ class DataLoader():
         self.data_file_tr = os.path.join(self.train_data_dir, "trajectories_train.cpkl")        
         self.data_file_te = os.path.join(self.base_test_path, "trajectories_test.cpkl")
         self.data_file_vl = os.path.join(self.val_data_dir, "trajectories_val.cpkl")
-
 
         # for creating a dict key: folder names, values: files in this folder
         self.create_folder_file_dict()
@@ -189,15 +185,12 @@ class DataLoader():
         # Ech list would contain the number of pedestrians in each frame in the dataset
         numPeds_data = []
         
-
         #each list includes ped ids of this frame
         pedsList_data = []
         valid_pedsList_data = []
         # target ped ids for each sequence
         target_ids = []
         orig_data = []
-
-
 
         # Index of the current dataset
         dataset_index = 0
@@ -213,7 +206,6 @@ class DataLoader():
             if self.infer is False:
                 df = pd.read_csv(directory, dtype={'frame_num':'int','ped_id':'int' }, delimiter = ' ',  header=None, names=column_names)
                 self.target_ids = np.array(df.drop_duplicates(subset=['ped_id'], keep='first', inplace=False)['ped_id'])
-
 
             else:
                 # if validation mode, read validation file to pandas dataframe and process
@@ -239,7 +231,6 @@ class DataLoader():
             # get frame numbers
             frameList = data[0, :].tolist()
 
-
             # Number of frames
             numFrames = len(frameList)
 
@@ -260,22 +251,13 @@ class DataLoader():
 
             target_ids.append(self.target_ids)
 
-
-
             for ind, frame in enumerate(frameList):
-
 
                 # Extract all pedestrians in current frame
                 pedsInFrame = data[: , data[0, :] == frame]
-                #print("peds in %d: %s"%(frame,str(pedsInFrame)))
-
-
 
                 # Extract peds list
                 pedsList = pedsInFrame[1, :].tolist()
-
-                # Add number of peds in the current frame to the stored data
-
 
                 # Initialize the row of the numpy array
                 pedsWithPos = []
@@ -296,20 +278,16 @@ class DataLoader():
                     pedsList_data[dataset_index].append(pedsList)
                     numPeds_data[dataset_index].append(len(pedsList))
 
-
                 else:
                     valid_frame_data[dataset_index].append(np.array(pedsWithPos))
                     valid_pedsList_data[dataset_index].append(pedsList)
                     valid_numPeds_data[dataset_index].append(len(pedsList))
-
-
 
             dataset_index += 1
         # Save the arrays in the pickle file
         f = open(data_file, "wb")
         pickle.dump((all_frame_data, frameList_data, numPeds_data, valid_numPeds_data, valid_frame_data, pedsList_data, valid_pedsList_data, target_ids, orig_data), f, protocol=2)
         f.close()
-
 
     def load_preprocessed(self, data_file, validation_set = False):
         '''
@@ -339,8 +317,6 @@ class DataLoader():
         self.target_ids = self.raw_data[7]
         self.orig_data = self.raw_data[8]
 
-
-
         counter = 0
         valid_counter = 0
         print('Sequence size(frame) ------>',self.seq_length)
@@ -369,14 +345,11 @@ class DataLoader():
         self.num_batches = int(counter/self.batch_size)
         self.valid_num_batches = int(valid_counter/self.batch_size)
 
-
         if not validation_set:
             print('Total number of training batches:', self.num_batches)
             print('Total number of validation batches:', self.valid_num_batches)
         else:
             print('Total number of validation batches:', self.num_batches)
-
-        # self.valid_num_batches = self.valid_num_batches * 2
 
     def next_batch(self):
         '''
@@ -443,7 +416,6 @@ class DataLoader():
         
         return x_batch, y_batch, d, numPedsList_batch, PedsList_batch, target_ids
 
-
     def next_valid_batch(self):
         '''
         Function to get the next Validation batch of points
@@ -462,7 +434,6 @@ class DataLoader():
         PedsList_batch = []
         target_ids = []
 
-
         # Iteration index
         i = 0
         while i < self.batch_size:
@@ -470,7 +441,6 @@ class DataLoader():
             frame_data = self.valid_data[self.valid_dataset_pointer]
             numPedsList = self.valid_numPedsList[self.valid_dataset_pointer]
             pedsList = self.valid_pedsList[self.valid_dataset_pointer]
-
 
             # Get the frame pointer for the current dataset
             idx = self.valid_frame_pointer
@@ -510,7 +480,6 @@ class DataLoader():
                 self.tick_batch_pointer(valid=True)
 
         return x_batch, y_batch, d, numPedsList_batch, PedsList_batch, target_ids
-
 
     def tick_batch_pointer(self, valid=False):
         '''
@@ -576,7 +545,6 @@ class DataLoader():
                 self.reset_batch_pointer(valid=False)
                 self.reset_batch_pointer(valid=True)
 
-
     def convert_proper_array(self, x_seq, num_pedlist, pedlist):
         #converter function to appropriate format. Instead of direcly use ped ids, we are mapping ped ids to
         #array indices using a lookup table for each sequence -> speed
@@ -629,7 +597,6 @@ class DataLoader():
             file_name = dir_.split('/')[-1]
             self.add_element_to_dict(self.folder_file_dict, folder_name, file_name)
 
-
     def get_directory_name(self, offset=0):
         #return folder name of file of processing or pointing by dataset pointer
         folder_name = self.data_dirs[self.dataset_pointer+offset].split('/')[-2]
@@ -660,25 +627,39 @@ class DataLoader():
         return len(self.data)
 
     def clean_test_data(self, x_seq, target_id, obs_lenght, predicted_lenght):
-        #remove (pedid, x , y) array if x or y is nan for each frame in observed part (for test mode)
+        """
+        remove (pedid, x , y) array if x or y is nan for each frame in observed part (for test mode)
+        """
+        # target_idが配列の場合は最初の要素を取得
+        if isinstance(target_id, (list, np.ndarray)):
+            target_id = target_id[0] if len(target_id) > 0 else 0
+        elif hasattr(target_id, 'item'):  # numpy scalar の場合
+            target_id = target_id.item()
+        
+        # 確実にスカラー値にする
+        target_id = int(target_id)
+        
+        # observed part (観測部分) のNaN要素を除去
         for frame_num in range(obs_lenght):
-            nan_elements_index = np.where(np.isnan(x_seq[frame_num][:, 2]))
+            if len(x_seq[frame_num]) > 0:  # フレームにデータがある場合のみ処理
+                nan_elements_index = np.where(np.isnan(x_seq[frame_num][:, 2]))
+                try:
+                    x_seq[frame_num] = np.delete(x_seq[frame_num], nan_elements_index[0], axis=0)
+                except ValueError:
+                    print(f"Error occurred at frame {frame_num} in observed part")
+                    pass
 
-            try:
-                x_seq[frame_num] = np.delete(x_seq[frame_num], nan_elements_index[0], axis=0)
-            except ValueError:
-                print("an error has been occured")
-                pass
-
-        for frame_num in range(obs_lenght, obs_lenght+predicted_lenght):
-            nan_elements_index = x_seq[frame_num][:, 0] != target_id
-
-            try:
-                x_seq[frame_num] = x_seq[frame_num][~nan_elements_index]
-
-            except ValueError:
-                pass
-
+        # predicted part (予測部分) でtarget_id以外を除去
+        for frame_num in range(obs_lenght, obs_lenght + predicted_lenght):
+            if len(x_seq[frame_num]) > 0:  # フレームにデータがある場合のみ処理
+                # target_idと一致しない要素のインデックスを取得
+                non_target_mask = x_seq[frame_num][:, 0] != target_id
+                try:
+                    # target_id以外の要素を除去
+                    x_seq[frame_num] = x_seq[frame_num][~non_target_mask]
+                except ValueError:
+                    print(f"Error occurred at frame {frame_num} in predicted part")
+                    pass
 
     def clean_ped_list(self, x_seq, pedlist_seq, target_id, obs_lenght, predicted_lenght):
         # remove peds from pedlist after test cleaning
