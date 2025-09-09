@@ -10,15 +10,13 @@ from model import SocialModel
 from utils import TrajectoryDataset, vectorize_seq, Gaussian2DLikelihood, time_lr_scheduler
 from grid import getSequenceGridMask
 
+# --- 変更点: deviceの定義をスクリプトの冒頭に移動 ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def main():
     parser = argparse.ArgumentParser()
     
-    # --- 変更点: --data_root 引数を完全に削除 ---
-    
-    # --- データセットとシーケンスに関する引数 ---
-    parser.add_argument('--dataset_name', type=str, default='eth', help='Dataset name to train on (eth, hotel, zara1, etc.)')
+    parser.add_argument('--dataset_name', type=str, default='eth', help='Dataset name (eth, hotel, zara1, etc.)')
     parser.add_argument('--obs_length', type=int, default=8,
                         help='Observation length')
     parser.add_argument('--pred_length', type=int, default=12,
@@ -40,7 +38,8 @@ def main():
     parser.add_argument('--freq_optimizer', type=int, default=8, help='Frequency of learning rate decay')
 
     # --- その他 ---
-    parser.add_argument('--use_cuda', action="store_true", default=True, help='Use GPU or not')
+    # --- 変更点: action="store_true" とし、デフォルトをFalseに変更 ---
+    parser.add_argument('--use_cuda', action="store_true", default=False, help='Use GPU or not')
     parser.add_argument('--tag', default='social_lstm_tag', help='personal tag for the model ')
     
     # SocialModelが必要とする固定の引数を設定
@@ -51,23 +50,26 @@ def main():
     
     args = parser.parse_args()
     
+    # --- 変更点: 実際にGPUが使えるかを確認し、フラグを更新 ---
+    args.use_cuda = args.use_cuda and torch.cuda.is_available()
+    
     args.seq_length = args.obs_length + args.pred_length
     train(args)
 
 def train(args):
-    # --- 変更点: STGCNNと同様のシンプルな相対パス指定に変更 ---
-    data_root = os.path.join('./datasets', args.dataset_name)
+    # データセットのパスを組み立て
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    data_root = os.path.join(script_dir, 'datasets', args.dataset_name)
     train_path = os.path.join(data_root, 'train')
     
-    # --- 重要: パスが存在するかどうかを確認し、なければ分かりやすいエラーを出す ---
     if not os.path.isdir(train_path):
         print("="*50)
         print(f"[エラー] 学習データディレクトリが見つかりません: {os.path.abspath(train_path)}")
-        print("実行場所（ワーキングディレクトリ）が間違っている可能性があります。")
-        print("Colabの左側のファイルブラウザで、'datasets'フォルダが'train.py'と同じ階層にあることを確認してください。")
         print(f"現在の実行場所: {os.getcwd()}")
+        print("Colabの左側のファイルブラウザで、'datasets'フォルダの構造を確認してください。")
+        print("例: ./datasets/eth/train/eth.txt")
         print("="*50)
-        return # エラーが見つかったので学習を中止
+        return
 
     print(f"Loading training data from {train_path}...")
     train_dataset = TrajectoryDataset(data_dir=train_path, obs_len=args.obs_length, pred_len=args.pred_length)
@@ -82,6 +84,9 @@ def train(args):
     net = SocialModel(args)
     if args.use_cuda:
         net = net.to(device)
+        print("Using GPU for training.")
+    else:
+        print("Using CPU for training.")
     
     optimizer = torch.optim.Adagrad(net.parameters(), weight_decay=args.lambda_param)
     
@@ -98,44 +103,28 @@ def train(args):
         loss_epoch = 0
         
         for batch_idx, (abs_traj, mask) in enumerate(train_loader):
-            # DataLoaderはバッチ次元を追加するので、それを削除 (batch_size=1なので)
-            abs_traj = abs_traj.squeeze(0) # (num_peds, seq_len, 2)
-            mask = mask.squeeze(0) # (num_peds, seq_len)
-            
-            if args.use_cuda:
-                abs_traj = abs_traj.to(device)
-                mask = mask.to(device)
+            abs_traj = abs_traj.squeeze(0).to(device)
+            mask = mask.squeeze(0).to(device)
                 
-            # 絶対座標を相対座標に変換
             rel_traj, _ = vectorize_seq(abs_traj)
             
-            # --- Social-LSTMモデルへの入力準備 ---
             num_peds = rel_traj.shape[0]
-            
-            # モデルの入力形式に合わせる (seq_len, num_peds, 2)
             full_rel_traj = rel_traj.permute(1, 0, 2)
             
-            # モデルは古い形式のPedsListとlookup_seqを必要とするため、ダミーを作成
             peds_list_seq = [list(range(num_peds))] * args.seq_length
             lookup_seq = {i: i for i in range(num_peds)}
 
-            # グリッドマスクの計算
             abs_traj_for_grid = abs_traj.permute(1, 0, 2)
             grid_seq = getSequenceGridMask(abs_traj_for_grid, [720, 576], peds_list_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
 
-            # 隠れ状態の初期化
             hidden_states = Variable(torch.zeros(num_peds, args.rnn_size)).to(device)
             cell_states = Variable(torch.zeros(num_peds, args.rnn_size)).to(device)
 
-            # --- フォワードパスとロス計算 ---
             optimizer.zero_grad()
             
-            # Social-LSTMはシーケンス全体を入力とする
-            # 入力はt=0からt=18、ターゲットはt=1からt=19
             outputs, _, _ = net(full_rel_traj[:-1], grid_seq[:-1], hidden_states, cell_states, peds_list_seq[:-1], None, None, lookup_seq)
             
-            # 損失計算 (ターゲットは1フレームずれる)
-            loss_mask = mask.permute(1,0)[1:] # (seq_len-1, num_peds)
+            loss_mask = mask.permute(1,0)[1:]
             loss = Gaussian2DLikelihood(outputs, full_rel_traj[1:], loss_mask)
             
             loss.backward()
@@ -151,10 +140,8 @@ def train(args):
             avg_loss = loss_epoch / len(train_loader)
             print(f'---- Epoch [{epoch+1}/{args.num_epochs}] summary: Average Loss: {avg_loss:.4f} ----')
         
-        # 学習率の減衰
         optimizer = time_lr_scheduler(optimizer, epoch, lr_decay_epoch=args.freq_optimizer)
         
-        # モデルの保存
         if (epoch+1) % 10 == 0:
             print('Saving model checkpoint...')
             torch.save({
