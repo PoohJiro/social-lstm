@@ -150,15 +150,7 @@ def time_lr_scheduler(optimizer, epoch, lr_decay=0.95, lr_decay_epoch=10):
 
 class DataLoader():
 
-    def __init__(self, batch_size=5, seq_length=20, num_of_validation=0, forcePreProcess=False, infer=False, generate=False):
-        
-        # --- 変更点: データセットのパスを自動的に見つける ---
-        # このファイル (utils.py) の絶対パスを取得
-        script_path = os.path.realpath(__file__)
-        # このファイルの親ディレクトリ（プロジェクトのルートと仮定）を取得
-        project_root = os.path.dirname(script_path)
-        # データセットのルートパスを組み立てる (例: <project_root>/datasets)
-        f_prefix = os.path.join(project_root, 'datasets')
+    def __init__(self, f_prefix, batch_size=5, seq_length=20, num_of_validation=0, forcePreProcess=False, infer=False, generate=False):
         
         base_test_dataset = [
             'eth/test.txt', 'hotel/test.txt', 'zara1/test.txt', 'zara2/test.txt', 'univ/test.txt'
@@ -186,7 +178,7 @@ class DataLoader():
                 print(f"[DataLoader Warning] File not found and skipped: {file_path}")
 
         if not self.data_files:
-            raise FileNotFoundError(f"No data files were found. Assumed datasets path is: {f_prefix}")
+            raise FileNotFoundError(f"No data files were found. Check the path in --data_root: {f_prefix}")
         
         self.validation_files = [os.path.join(f_prefix, d) for d in base_validation_dataset]
         self.validation_files = [f for f in self.validation_files if os.path.exists(f)]
