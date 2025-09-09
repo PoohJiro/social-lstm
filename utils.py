@@ -107,8 +107,10 @@ class TrajectoryDataset(Dataset):
         self.sequences = [] # 各シーケンスのデータを格納するリスト
 
         for path in all_files:
-            # データを読み込む (frame, id, x, y)
-            data = np.loadtxt(path, delimiter=' ', dtype=np.float32)
+            # --- 変更点: delimiterをスペースまたはタブに対応するように修正 ---
+            # delimiter=' ' から delimiter=None に変更することで、
+            # スペースやタブなどの任意の空白文字を区切りとして認識します。
+            data = np.loadtxt(path, delimiter=None, dtype=np.float32)
             
             frames = np.unique(data[:, 0]).tolist()
             frame_data = {frame: data[data[:, 0] == frame, :] for frame in frames}
