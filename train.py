@@ -15,11 +15,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     parser = argparse.ArgumentParser()
     
-    # --- 変更点: データセットの場所を指定する引数を「必須」として再度追加 ---
-    parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of the datasets (e.g., /content/datasets)')
-
     # --- データセットとシーケンスに関する引数 ---
+    parser.add_argument('--dataset_name', type=str, default='eth', help='Dataset name (eth, hotel, zara1, etc.)')
     parser.add_argument('--obs_length', type=int, default=8,
                         help='Observation length')
     parser.add_argument('--pred_length', type=int, default=12,
@@ -33,8 +30,7 @@ def main():
     parser.add_argument('--gru', action="store_true", default=False, help='Use GRU instead of LSTM')
 
     # --- 学習に関する引数 ---
-    # Social-LSTMは1シーケンスずつ処理するためバッチサイズは1に固定
-    parser.add_argument('--batch_size', type=int, default=1, help='minibatch size (must be 1)')
+    parser.add_argument('--batch_size', type=int, default=1, help='minibatch size (must be 1 for this model)')
     parser.add_argument('--num_epochs', type=int, default=50, help='number of epochs')
     parser.add_argument('--grad_clip', type=float, default=10., help='clip gradients at this value')
     parser.add_argument('--learning_rate', type=float, default=0.003, help='learning rate')
@@ -43,24 +39,24 @@ def main():
 
     # --- その他 ---
     parser.add_argument('--use_cuda', action="store_true", default=True, help='Use GPU or not')
+    parser.add_argument('--tag', default='social_lstm_tag', help='personal tag for the model ')
     
     # SocialModelが必要とする固定の引数を設定
     parser.add_argument('--input_size', type=int, default=2)
     parser.add_argument('--output_size', type=int, default=5)
     parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--maxNumPeds', type=int, default=100) # 十分に大きな値
+    parser.add_argument('--maxNumPeds', type=int, default=100) 
     
     args = parser.parse_args()
     
-    # seq_lengthはobs_lengthとpred_lengthから自動計算
     args.seq_length = args.obs_length + args.pred_length
     train(args)
 
 def train(args):
-    # --- 変更点: 引数で渡されたデータパスを使用 ---
-    data_root = args.data_root
-    
-    # データセットとデータローダーの準備
+    # データセットのパスを組み立て
+    # このスクリプト(train.py)と同じ階層にあるdatasetsフォルダを想定
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    data_root = os.path.join(script_dir, 'datasets', args.dataset_name)
     train_path = os.path.join(data_root, 'train')
     
     print(f"Loading training data from {train_path}...")
@@ -78,9 +74,9 @@ def train(args):
     
     # 保存用ディレクトリの準備
     model_name = "GRU" if args.gru else "LSTM"
-    save_directory = os.path.join('model', 'SOCIALLSTM', model_name)
-    os.makedirs(save_directory, exist_ok=True)
-    with open(os.path.join(save_directory,'config.pkl'), 'wb') as f:
+    checkpoint_dir = os.path.join('./checkpoint', args.tag, model_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(os.path.join(checkpoint_dir,'config.pkl'), 'wb') as f:
         pickle.dump(args, f)
 
     # Training
@@ -136,7 +132,7 @@ def train(args):
             loss_epoch += loss.item()
             
             if batch_idx % 50 == 0:
-                print(f'Epoch [{epoch+1}/{args.num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Loss: {loss.item():.4f}')
+                print(f'Epoch [{epoch+1}/{args.num_epochs}], Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
         
         avg_loss = loss_epoch / len(train_loader)
         print(f'---- Epoch [{epoch+1}/{args.num_epochs}] summary: Average Loss: {avg_loss:.4f} ----')
@@ -151,7 +147,7 @@ def train(args):
                 'epoch': epoch+1,
                 'state_dict': net.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict()
-            }, os.path.join(save_directory, f'SOCIALLSTM_{model_name}_model_{epoch+1}.tar'))
+            }, os.path.join(checkpoint_dir, f'model_{epoch+1}.tar'))
 
     print('Training finished.')
 
