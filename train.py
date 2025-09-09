@@ -15,8 +15,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     parser = argparse.ArgumentParser()
     
+    # --- 変更点: --data_root 引数を完全に削除 ---
+    
     # --- データセットとシーケンスに関する引数 ---
-    parser.add_argument('--dataset_name', type=str, default='eth', help='Dataset name (eth, hotel, zara1, etc.)')
+    parser.add_argument('--dataset_name', type=str, default='eth', help='Dataset name to train on (eth, hotel, zara1, etc.)')
     parser.add_argument('--obs_length', type=int, default=8,
                         help='Observation length')
     parser.add_argument('--pred_length', type=int, default=12,
@@ -53,16 +55,27 @@ def main():
     train(args)
 
 def train(args):
-    # データセットのパスを組み立て
-    # このスクリプト(train.py)と同じ階層にあるdatasetsフォルダを想定
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    data_root = os.path.join(script_dir, 'datasets', args.dataset_name)
+    # --- 変更点: STGCNNと同様のシンプルな相対パス指定に変更 ---
+    data_root = os.path.join('./datasets', args.dataset_name)
     train_path = os.path.join(data_root, 'train')
     
+    # --- 重要: パスが存在するかどうかを確認し、なければ分かりやすいエラーを出す ---
+    if not os.path.isdir(train_path):
+        print("="*50)
+        print(f"[エラー] 学習データディレクトリが見つかりません: {os.path.abspath(train_path)}")
+        print("実行場所（ワーキングディレクトリ）が間違っている可能性があります。")
+        print("Colabの左側のファイルブラウザで、'datasets'フォルダが'train.py'と同じ階層にあることを確認してください。")
+        print(f"現在の実行場所: {os.getcwd()}")
+        print("="*50)
+        return # エラーが見つかったので学習を中止
+
     print(f"Loading training data from {train_path}...")
     train_dataset = TrajectoryDataset(data_dir=train_path, obs_len=args.obs_length, pred_len=args.pred_length)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     
+    if len(train_dataset) == 0:
+        print(f"Warning: 0 sequences found in {train_path}. Check the contents of the text files.")
+
     print(f"Found {len(train_dataset)} sequences in the training set.")
 
     # モデルの準備
@@ -134,8 +147,9 @@ def train(args):
             if batch_idx % 50 == 0:
                 print(f'Epoch [{epoch+1}/{args.num_epochs}], Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
         
-        avg_loss = loss_epoch / len(train_loader)
-        print(f'---- Epoch [{epoch+1}/{args.num_epochs}] summary: Average Loss: {avg_loss:.4f} ----')
+        if len(train_loader) > 0:
+            avg_loss = loss_epoch / len(train_loader)
+            print(f'---- Epoch [{epoch+1}/{args.num_epochs}] summary: Average Loss: {avg_loss:.4f} ----')
         
         # 学習率の減衰
         optimizer = time_lr_scheduler(optimizer, epoch, lr_decay_epoch=args.freq_optimizer)
