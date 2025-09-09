@@ -15,9 +15,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     parser = argparse.ArgumentParser()
     
+    # --- 変更点: --data_root 引数を削除 ---
+
     # --- データセットとシーケンスに関する引数 ---
-    parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of the datasets (e.g., /content/datasets)')
     parser.add_argument('--obs_length', type=int, default=8,
                         help='Observation length')
     parser.add_argument('--pred_length', type=int, default=12,
@@ -55,8 +55,14 @@ def main():
     train(args)
 
 def train(args):
+    # --- 変更点: データセットのパスを自動的に見つける ---
+    # このファイル (train.py) の場所を基準にする
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    # 'datasets' フォルダが同じ階層にあると仮定する
+    data_root = os.path.join(script_dir, 'datasets')
+    
     # データセットとデータローダーの準備
-    train_path = os.path.join(args.data_root, 'train')
+    train_path = os.path.join(data_root, 'train')
     
     print(f"Loading training data from {train_path}...")
     train_dataset = TrajectoryDataset(data_dir=train_path, obs_len=args.obs_length, pred_len=args.pred_length)
