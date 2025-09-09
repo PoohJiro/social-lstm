@@ -15,7 +15,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     parser = argparse.ArgumentParser()
     
-    # --- 変更点: --data_root 引数を削除 ---
+    # --- 変更点: データセットの場所を指定する引数を「必須」として再度追加 ---
+    parser.add_argument('--data_root', type=str, required=True,
+                        help='Root directory of the datasets (e.g., /content/datasets)')
 
     # --- データセットとシーケンスに関する引数 ---
     parser.add_argument('--obs_length', type=int, default=8,
@@ -55,11 +57,8 @@ def main():
     train(args)
 
 def train(args):
-    # --- 変更点: データセットのパスを自動的に見つける ---
-    # このファイル (train.py) の場所を基準にする
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    # 'datasets' フォルダが同じ階層にあると仮定する
-    data_root = os.path.join(script_dir, 'datasets')
+    # --- 変更点: 引数で渡されたデータパスを使用 ---
+    data_root = args.data_root
     
     # データセットとデータローダーの準備
     train_path = os.path.join(data_root, 'train')
