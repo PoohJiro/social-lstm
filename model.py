@@ -1,79 +1,66 @@
+# model.py
 import torch
 import torch.nn as nn
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 class SocialModel(nn.Module):
-    """
-    Social-STGCNNデータセットで動作する、シンプルなEncoder-Decoder LSTMモデル
-    """
     def __init__(self, args):
         super(SocialModel, self).__init__()
-
-        self.obs_len = args.obs_len
-        self.pred_len = args.pred_len
+        self.args = args
         self.rnn_size = args.rnn_size
+        self.grid_size = args.grid_size
         self.embedding_size = args.embedding_size
-        self.use_gru = args.gru
-
-        # --- Encoder ---
-        # 座標(x,y)を埋め込みベクトルに変換
+        
         self.input_embedding = nn.Linear(args.input_size, self.embedding_size)
-        
-        # LSTMまたはGRU層
-        if self.use_gru:
-            self.encoder = nn.GRU(self.embedding_size, self.rnn_size, batch_first=True)
-        else:
-            self.encoder = nn.LSTM(self.embedding_size, self.rnn_size, batch_first=True)
-
-        # --- Decoder ---
-        # Decoderも同じRNNセルを使用
-        if self.use_gru:
-            self.decoder = nn.GRU(self.embedding_size, self.rnn_size, batch_first=True)
-        else:
-            self.decoder = nn.LSTM(self.embedding_size, self.rnn_size, batch_first=True)
-            
-        # RNNの出力（隠れ状態）を座標(x,y)に変換
+        self.tensor_embedding = nn.Linear(self.grid_size * self.grid_size * self.rnn_size, self.embedding_size)
         self.output_layer = nn.Linear(self.rnn_size, args.output_size)
-        
-        # 活性化関数
         self.relu = nn.ReLU()
 
-    def forward(self, obs_traj):
-        """
-        Args:
-            obs_traj (torch.Tensor): 観測された軌跡 (batch_size, obs_len, 2)
-        Returns:
-            pred_traj (torch.Tensor): 予測された軌跡 (batch_size, pred_len, 2)
-        """
-        batch_size = obs_traj.size(0)
+        self.cell = nn.LSTMCell(2 * self.embedding_size, self.rnn_size)
 
-        # --- Encoding Phase ---
-        # (batch, obs_len, 2) -> (batch, obs_len, embedding_size)
-        embedded_obs = self.relu(self.input_embedding(obs_traj))
+    def get_social_tensor(self, grid_mask, hidden_states):
+        num_peds = hidden_states.shape[0]
+        grid_mask_t = grid_mask.permute(0, 2, 1)
+        social_tensor = torch.matmul(grid_mask_t, hidden_states)
+        return social_tensor.view(num_peds, -1)
+
+    def forward(self, obs_traj_rel, grids):
+        batch_size, obs_len, num_peds, _ = obs_traj_rel.shape
         
-        # エンコーダーで軌跡全体を処理し、最後の隠れ状態（と記憶セル）を取得
-        _, hidden_state = self.encoder(embedded_obs)
+        hidden_states = torch.zeros(batch_size * num_peds, self.rnn_size).to(device)
+        cell_states = torch.zeros(batch_size * num_peds, self.rnn_size).to(device)
+
+        # --- Encoder ---
+        for t in range(obs_len):
+            frame_obs_rel = obs_traj_rel[:, t].reshape(-1, 2)
+            grid_mask = grids[:, t].reshape(batch_size * num_peds, num_peds, -1)
+            
+            social_tensor = self.get_social_tensor(grid_mask, hidden_states)
+            input_embedded = self.relu(self.input_embedding(frame_obs_rel))
+            tensor_embedded = self.relu(self.tensor_embedding(social_tensor))
+            
+            concat_embedded = torch.cat([input_embedded, tensor_embedded], dim=1)
+            
+            h, c = self.cell(concat_embedded, (hidden_states, cell_states))
+            hidden_states, cell_states = h, c
         
-        # --- Decoding Phase ---
-        # 予測された軌跡を格納するリスト
+        # --- Decoder ---
         predictions = []
+        last_pos_rel = obs_traj_rel[:, -1].reshape(-1, 2)
         
-        # デコーダーの最初の入力は、観測の最後の座標
-        decoder_input = embedded_obs[:, -1, :].unsqueeze(1) # (batch, 1, embedding_size)
-
-        for _ in range(self.pred_len):
-            # デコーダーを1ステップ実行
-            output, hidden_state = self.decoder(decoder_input, hidden_state)
+        for _ in range(self.args.pred_len):
+            social_tensor = self.get_social_tensor(grids[:, -1].reshape(batch_size * num_peds, num_peds, -1), hidden_states)
+            input_embedded = self.relu(self.input_embedding(last_pos_rel))
+            tensor_embedded = self.relu(self.tensor_embedding(social_tensor))
             
-            # 出力を座標に変換
-            # (batch, 1, rnn_size) -> (batch, 1, 2)
-            pred_step = self.output_layer(output)
-            predictions.append(pred_step)
+            concat_embedded = torch.cat([input_embedded, tensor_embedded], dim=1)
             
-            # 次のステップの入力は、今回予測した座標を埋め込んだもの
-            decoder_input = self.relu(self.input_embedding(pred_step))
-
-        # 予測を一つのテンソルにまとめる
-        # [(batch, 1, 2), (batch, 1, 2), ...] -> (batch, pred_len, 2)
-        pred_traj = torch.cat(predictions, dim=1)
-
-        return pred_traj
+            h, c = self.cell(concat_embedded, (hidden_states, cell_states))
+            hidden_states, cell_states = h, c
+            
+            output = self.output_layer(hidden_states)
+            predictions.append(output)
+            last_pos_rel = output
+            
+        return torch.stack(predictions, dim=1).reshape(batch_size, self.args.pred_len, num_peds, 2)
