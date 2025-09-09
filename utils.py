@@ -13,6 +13,7 @@ class DataLoader:
         self.seq_len = obs_len + pred_len
 
         self.dataset_name = os.path.basename(data_dir)
+        # Social-STGCNNのデータセットは通常 .txt 形式
         data_file = os.path.join(self.data_dir, f"{self.dataset_name}.txt")
         processed_file = os.path.join(self.data_dir, "trajectories.cpkl")
 
@@ -27,20 +28,21 @@ class DataLoader:
         # 軌跡データをフレームID、歩行者IDでグループ化
         data = np.loadtxt(data_file, delimiter='\t')
         frames = np.unique(data[:, 0]).tolist()
+        
         frame_data = []
         for frame in frames:
             frame_data.append(data[data[:, 0] == frame, :])
         
-        # 歩行者IDごとの軌跡に変換
-        num_peds = int(np.max(data[:, 1]))
-        traj_data = np.zeros((len(frames), num_peds + 1, 4)) # frame, ped_id, x, y
-        traj_data[:] = np.nan
+        # 歩行者IDごとの軌跡に変換 (IDは浮動小数点数から整数へ)
+        peds = np.unique(data[:, 1]).astype(int)
+        num_peds = np.max(peds)
+        
+        traj_data = np.full((len(frames), num_peds + 1, 4), np.nan) # nanで初期化
 
         for idx, frame in enumerate(frame_data):
             for ped in frame:
-                traj_data[idx, int(ped[1])] = ped
+                traj_data[idx, int(ped[1]), :] = ped
         
-        # pickleで保存
         with open(out_file, "wb") as f:
             pickle.dump(traj_data, f)
 
@@ -48,32 +50,35 @@ class DataLoader:
         with open(data_file, 'rb') as f:
             self.raw_data = pickle.load(f)
 
-        self.peds_in_seq = []
         self.sequences_abs = [] # 絶対座標
-        self.sequences_rel = [] # 相対座標 (速度)
 
         # self.seq_len の長さを持つシーケンスを切り出す
         for i in range(self.raw_data.shape[0] - self.seq_len + 1):
-            seq_abs = self.raw_data[i:i+self.seq_len, :, 2:4].copy()
-            # このシーケンスに登場する歩行者（NaNでない軌跡）のIDを取得
-            peds_present = ~np.isnan(seq_abs).all(axis=(0, 2))
+            seq_abs_all_peds = self.raw_data[i:i+self.seq_len, :, 2:4].copy()
             
-            if not np.any(peds_present):
+            # このシーケンスに一度でも登場する歩行者の列のみを抽出
+            peds_present_mask = ~np.all(np.isnan(seq_abs_all_peds), axis=(0, 2))
+            
+            # 歩行者が一人もいないシーケンスはスキップ
+            if not np.any(peds_present_mask):
                 continue
             
-            # 歩行者がいない列を削除
-            seq_abs = seq_abs[:, peds_present, :]
+            seq_abs = seq_abs_all_peds[:, peds_present_mask, :]
             
-            # 相対座標を計算
-            seq_rel = np.zeros_like(seq_abs)
-            seq_rel[1:, :, :] = seq_abs[1:, :, :] - seq_abs[:-1, :, :]
+            # シーケンスの開始時点で存在しない歩行者の軌跡を線形補間で埋める
+            for p in range(seq_abs.shape[1]):
+                if np.isnan(seq_abs[0, p, 0]):
+                    # 最初に現れるフレームを探す
+                    first_valid_idx = np.where(~np.isnan(seq_abs[:, p, 0]))[0]
+                    if len(first_valid_idx) > 0:
+                        first_idx = first_valid_idx[0]
+                        seq_abs[:first_idx, p, :] = seq_abs[first_idx, p, :]
             
             self.sequences_abs.append(seq_abs)
-            self.sequences_rel.append(seq_rel)
 
         self.num_sequences = len(self.sequences_abs)
         self.num_batches = int(self.num_sequences / self.batch_size)
-        print(f"Loaded {self.num_sequences} sequences, creating {self.num_batches} batches.")
+        print(f"Loaded {self.num_sequences} sequences from {self.dataset_name}, creating {self.num_batches} batches.")
 
     def next_batch(self):
         if self.pointer + self.batch_size > self.num_sequences:
@@ -81,42 +86,41 @@ class DataLoader:
 
         start = self.pointer
         end = self.pointer + self.batch_size
+        indices_in_batch = self.indices[start:end]
         self.pointer += self.batch_size
         
-        # バッチ内の最大歩行者数を取得
         max_peds = 0
-        for i in range(start, end):
+        for i in indices_in_batch:
             max_peds = max(max_peds, self.sequences_abs[i].shape[1])
         
-        # バッチデータを格納するテンソルを初期化
-        batch_obs_abs = np.zeros((self.batch_size, self.obs_len, max_peds, 2))
-        batch_obs_rel = np.zeros((self.batch_size, self.obs_len, max_peds, 2))
-        batch_pred_gt_abs = np.zeros((self.batch_size, self.pred_len, max_peds, 2))
-        batch_pred_gt_rel = np.zeros((self.batch_size, self.pred_len, max_peds, 2))
+        batch_obs_abs = np.full((self.batch_size, self.obs_len, max_peds, 2), np.nan)
+        batch_pred_gt_abs = np.full((self.batch_size, self.pred_len, max_peds, 2), np.nan)
+        batch_obs_rel = np.full((self.batch_size, self.obs_len, max_peds, 2), np.nan)
         
-        # バッチ内の各シーケンスをパディングして格納
-        for i, idx in enumerate(range(start, end)):
-            seq_abs = self.sequences_abs[idx]
-            seq_rel = self.sequences_rel[idx]
-            num_peds = seq_abs.shape[1]
+        for i, seq_idx in enumerate(indices_in_batch):
+            seq_abs = self.sequences_abs[seq_idx]
+            num_peds_in_seq = seq_abs.shape[1]
             
-            batch_obs_abs[i, :, :num_peds, :] = seq_abs[:self.obs_len]
-            batch_obs_rel[i, :, :num_peds, :] = seq_rel[:self.obs_len]
-            batch_pred_gt_abs[i, :, :num_peds, :] = seq_abs[self.obs_len:]
-            batch_pred_gt_rel[i, :, :num_peds, :] = seq_rel[self.obs_len:]
+            obs_abs = seq_abs[:self.obs_len]
+            pred_abs = seq_abs[self.obs_len:]
+            
+            # 相対座標（速度）を計算
+            obs_rel = np.zeros_like(obs_abs)
+            obs_rel[1:, :, :] = obs_abs[1:, :, :] - obs_abs[:-1, :, :]
+            
+            batch_obs_abs[i, :, :num_peds_in_seq, :] = obs_abs
+            batch_pred_gt_abs[i, :, :num_peds_in_seq, :] = pred_abs
+            batch_obs_rel[i, :, :num_peds_in_seq, :] = obs_rel
 
         return (
             torch.from_numpy(batch_obs_rel).float(),
-            torch.from_numpy(batch_pred_gt_rel).float(),
             torch.from_numpy(batch_obs_abs).float(),
             torch.from_numpy(batch_pred_gt_abs).float(),
         )
 
     def reset_batch_pointer(self):
-        # シーケンスのインデックスをシャッフル
         self.indices = np.random.permutation(self.num_sequences)
         self.pointer = 0
         
     def get_num_batches(self):
         return self.num_batches
-
