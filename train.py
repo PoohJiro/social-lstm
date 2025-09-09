@@ -16,9 +16,7 @@ def main():
     
     parser = argparse.ArgumentParser()
     
-    # --- 変更点: データセットの場所を指定する引数を必須で追加 ---
-    parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of the datasets (e.g., /content/datasets)')
+    # --- 変更点: --data_root 引数を完全に削除 ---
 
     # RNN size parameter (dimension of the output/hidden state)
     parser.add_argument('--input_size', type=int, default=2)
@@ -91,9 +89,9 @@ def train(args):
     os.makedirs("log", exist_ok=True)
     os.makedirs("model", exist_ok=True)
     
-    # --- 変更点: DataLoaderにデータパス(f_prefix)を渡すように修正 ---
-    dataloader = DataLoader(f_prefix=args.data_root, 
-                            batch_size=args.batch_size, 
+    # --- 変更点: DataLoaderの呼び出し方をシンプルに修正 ---
+    # データパスはDataLoaderが自動で見つけるため、ここでは引数を渡さない
+    dataloader = DataLoader(batch_size=args.batch_size, 
                             seq_length=args.seq_length, 
                             num_of_validation=args.num_validation, 
                             forcePreProcess=args.forcePreProcess)
