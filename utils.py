@@ -1,126 +1,114 @@
-# utils.py
+# utils.py (Social-STGCNNの構造をSocial-LSTM用に改造した最終版)
 import os
-import pickle
-import numpy as np
+import math
 import torch
+import numpy as np
+from torch.utils.data import Dataset
+from tqdm import tqdm
 
-class DataLoader:
-    def __init__(self, data_dir, batch_size=50, obs_len=8, pred_len=12, forcePreProcess=False):
+def read_file(_path, delim='\t'):
+    """指定されたパスからデータを読み込むヘルパー関数"""
+    data = []
+    if delim == 'tab':
+        delim = '\t'
+    elif delim == 'space':
+        delim = ' '
+    with open(_path, 'r') as f:
+        for line in f:
+            line = line.strip().split(delim)
+            line = [float(i) for i in line]
+            data.append(line)
+    return np.asarray(data)
+
+class TrajectoryDataset(Dataset):
+    """Trajectoryデータセット用のPyTorch Datasetクラス"""
+    def __init__(self, data_dir, obs_len=8, pred_len=12, skip=1, min_ped=1, delim='\t'):
+        """
+        Args:
+        - data_dir: データセットファイルが含まれるディレクトリ
+        - obs_len: 観測期間の長さ
+        - pred_len: 予測期間の長さ
+        - skip: シーケンスを作成する際のフレームのスキップ数
+        - min_ped: シーケンスに含まれるべき最小の歩行者数
+        - delim: データファイルの区切り文字
+        """
+        super(TrajectoryDataset, self).__init__()
+
         self.data_dir = data_dir
-        self.batch_size = batch_size
         self.obs_len = obs_len
         self.pred_len = pred_len
-        self.seq_len = obs_len + pred_len
+        self.skip = skip
+        self.seq_len = self.obs_len + self.pred_len
+        self.delim = delim
+        self.min_ped = min_ped
 
-        self.dataset_name = os.path.basename(data_dir)
-        # Social-STGCNNのデータセットは通常 .txt 形式
-        data_file = os.path.join(self.data_dir, f"{self.dataset_name}.txt")
-        processed_file = os.path.join(self.data_dir, "trajectories.cpkl")
-
-        if not os.path.exists(processed_file) or forcePreProcess:
-            print(f"Creating pre-processed data for {self.dataset_name}...")
-            self.frame_preprocess(data_file, processed_file)
-
-        self.load_preprocessed(processed_file)
-        self.reset_batch_pointer()
-
-    def frame_preprocess(self, data_file, out_file):
-        # 軌跡データをフレームID、歩行者IDでグループ化
-        data = np.loadtxt(data_file, delimiter='\t')
-        frames = np.unique(data[:, 0]).tolist()
+        all_files = [os.path.join(self.data_dir, path) for path in os.listdir(self.data_dir)]
         
-        frame_data = []
-        for frame in frames:
-            frame_data.append(data[data[:, 0] == frame, :])
+        num_peds_in_seq = []
+        seq_list = []
+        seq_list_rel = []
+
+        for path in all_files:
+            data = read_file(path, self.delim)
+            frames = np.unique(data[:, 0]).tolist()
+            frame_data = [data[frame == data[:, 0], :] for frame in frames]
+            
+            num_sequences = int(math.ceil((len(frames) - self.seq_len + 1) / self.skip))
+
+            for idx in range(0, num_sequences * self.skip, self.skip):
+                # 現在のシーケンスのデータを取得
+                curr_seq_data = np.concatenate(frame_data[idx:idx + self.seq_len], axis=0)
+                peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
+                
+                curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+                curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+                
+                num_peds_considered = 0
+                for _, ped_id in enumerate(peds_in_curr_seq):
+                    curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
+                    
+                    # シーケンスの長さに満たない歩行者は除外
+                    if len(curr_ped_seq) != self.seq_len:
+                        continue
+                    
+                    curr_ped_seq = np.transpose(curr_ped_seq[:, 2:])
+                    
+                    # 相対座標（速度）を計算
+                    rel_curr_ped_seq = np.zeros(curr_ped_seq.shape)
+                    rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
+                    
+                    _idx = num_peds_considered
+                    curr_seq[_idx, :, :] = curr_ped_seq
+                    curr_seq_rel[_idx, :, :] = rel_curr_ped_seq
+                    num_peds_considered += 1
+
+                if num_peds_considered >= self.min_ped:
+                    num_peds_in_seq.append(num_peds_considered)
+                    seq_list.append(curr_seq[:num_peds_considered])
+                    seq_list_rel.append(curr_seq_rel[:num_peds_considered])
+
+        self.num_seq = len(seq_list)
         
-        # 歩行者IDごとの軌跡に変換 (IDは浮動小数点数から整数へ)
-        peds = np.unique(data[:, 1]).astype(int)
-        num_peds = np.max(peds)
+        # ★★★ Social-LSTMではグラフは不要なため、グラフ作成処理は全て削除 ★★★
+        #     seq_to_graph や V_obs, A_obs といった変数は使いません。
         
-        traj_data = np.full((len(frames), num_peds + 1, 4), np.nan) # nanで初期化
+        # 代わりに、絶対座標と相対座標のシーケンスをそのまま保持します。
+        self.seq_list_abs = seq_list
+        self.seq_list_rel = seq_list_rel
 
-        for idx, frame in enumerate(frame_data):
-            for ped in frame:
-                traj_data[idx, int(ped[1]), :] = ped
+    def __len__(self):
+        return self.num_seq
+
+    def __getitem__(self, index):
+        # Social-LSTMモデルが必要とするデータのみを返すように修正
+        obs_traj_abs = torch.from_numpy(self.seq_list_abs[index][:, :, :self.obs_len]).float()
+        pred_traj_abs = torch.from_numpy(self.seq_list_abs[index][:, :, self.obs_len:]).float()
+        obs_traj_rel = torch.from_numpy(self.seq_list_rel[index][:, :, :self.obs_len]).float()
+        pred_traj_rel = torch.from_numpy(self.seq_list_rel[index][:, :, self.obs_len:]).float()
         
-        with open(out_file, "wb") as f:
-            pickle.dump(traj_data, f)
-
-    def load_preprocessed(self, data_file):
-        with open(data_file, 'rb') as f:
-            self.raw_data = pickle.load(f)
-
-        self.sequences_abs = [] # 絶対座標
-
-        # self.seq_len の長さを持つシーケンスを切り出す
-        for i in range(self.raw_data.shape[0] - self.seq_len + 1):
-            seq_abs_all_peds = self.raw_data[i:i+self.seq_len, :, 2:4].copy()
-            
-            # このシーケンスに一度でも登場する歩行者の列のみを抽出
-            peds_present_mask = ~np.all(np.isnan(seq_abs_all_peds), axis=(0, 2))
-            
-            # 歩行者が一人もいないシーケンスはスキップ
-            if not np.any(peds_present_mask):
-                continue
-            
-            seq_abs = seq_abs_all_peds[:, peds_present_mask, :]
-            
-            # シーケンスの開始時点で存在しない歩行者の軌跡を線形補間で埋める
-            for p in range(seq_abs.shape[1]):
-                if np.isnan(seq_abs[0, p, 0]):
-                    # 最初に現れるフレームを探す
-                    first_valid_idx = np.where(~np.isnan(seq_abs[:, p, 0]))[0]
-                    if len(first_valid_idx) > 0:
-                        first_idx = first_valid_idx[0]
-                        seq_abs[:first_idx, p, :] = seq_abs[first_idx, p, :]
-            
-            self.sequences_abs.append(seq_abs)
-
-        self.num_sequences = len(self.sequences_abs)
-        self.num_batches = int(self.num_sequences / self.batch_size)
-        print(f"Loaded {self.num_sequences} sequences from {self.dataset_name}, creating {self.num_batches} batches.")
-
-    def next_batch(self):
-        if self.pointer + self.batch_size > self.num_sequences:
-            self.reset_batch_pointer()
-
-        start = self.pointer
-        end = self.pointer + self.batch_size
-        indices_in_batch = self.indices[start:end]
-        self.pointer += self.batch_size
-        
-        max_peds = 0
-        for i in indices_in_batch:
-            max_peds = max(max_peds, self.sequences_abs[i].shape[1])
-        
-        batch_obs_abs = np.full((self.batch_size, self.obs_len, max_peds, 2), np.nan)
-        batch_pred_gt_abs = np.full((self.batch_size, self.pred_len, max_peds, 2), np.nan)
-        batch_obs_rel = np.full((self.batch_size, self.obs_len, max_peds, 2), np.nan)
-        
-        for i, seq_idx in enumerate(indices_in_batch):
-            seq_abs = self.sequences_abs[seq_idx]
-            num_peds_in_seq = seq_abs.shape[1]
-            
-            obs_abs = seq_abs[:self.obs_len]
-            pred_abs = seq_abs[self.obs_len:]
-            
-            # 相対座標（速度）を計算
-            obs_rel = np.zeros_like(obs_abs)
-            obs_rel[1:, :, :] = obs_abs[1:, :, :] - obs_abs[:-1, :, :]
-            
-            batch_obs_abs[i, :, :num_peds_in_seq, :] = obs_abs
-            batch_pred_gt_abs[i, :, :num_peds_in_seq, :] = pred_abs
-            batch_obs_rel[i, :, :num_peds_in_seq, :] = obs_rel
-
         return (
-            torch.from_numpy(batch_obs_rel).float(),
-            torch.from_numpy(batch_obs_abs).float(),
-            torch.from_numpy(batch_pred_gt_abs).float(),
+            obs_traj_abs.permute(2, 0, 1),   # (obs_len, num_peds, 2)
+            pred_traj_abs.permute(2, 0, 1),  # (pred_len, num_peds, 2)
+            obs_traj_rel.permute(2, 0, 1),   # (obs_len, num_peds, 2)
+            pred_traj_rel.permute(2, 0, 1),  # (pred_len, num_peds, 2)
         )
-
-    def reset_batch_pointer(self):
-        self.indices = np.random.permutation(self.num_sequences)
-        self.pointer = 0
-        
-    def get_num_batches(self):
-        return self.num_batches
