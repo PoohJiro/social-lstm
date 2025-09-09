@@ -1,229 +1,154 @@
 import torch
-import numpy as np
+from torch.utils.data import DataLoader
 from torch.autograd import Variable
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import argparse
 import os
 import time
 import pickle
-import subprocess
 
 from model import SocialModel
-from utils import DataLoader, get_mean_error, get_final_error, revert_seq, vectorize_seq, time_lr_scheduler, Gaussian2DLikelihood
+from utils import TrajectoryDataset, vectorize_seq, Gaussian2DLikelihood, time_lr_scheduler
 from grid import getSequenceGridMask
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def main():
-    
     parser = argparse.ArgumentParser()
     
-    # --- 変更点: データセットの場所を指定する引数を「必須」として再度追加 ---
+    # --- データセットとシーケンスに関する引数 ---
     parser.add_argument('--data_root', type=str, required=True,
                         help='Root directory of the datasets (e.g., /content/datasets)')
+    parser.add_argument('--obs_length', type=int, default=8,
+                        help='Observation length')
+    parser.add_argument('--pred_length', type=int, default=12,
+                        help='Prediction length')
+    
+    # --- モデルのハイパーパラメータ ---
+    parser.add_argument('--rnn_size', type=int, default=128, help='size of RNN hidden state')
+    parser.add_argument('--embedding_size', type=int, default=64, help='Embedding dimension')
+    parser.add_argument('--neighborhood_size', type=int, default=32, help='Neighborhood size')
+    parser.add_argument('--grid_size', type=int, default=4, help='Grid size')
+    parser.add_argument('--gru', action="store_true", default=False, help='Use GRU instead of LSTM')
 
-    # RNN size parameter (dimension of the output/hidden state)
+    # --- 学習に関する引数 ---
+    # Social-LSTMは1シーケンスずつ処理するためバッチサイズは1に固定
+    parser.add_argument('--batch_size', type=int, default=1, help='minibatch size (must be 1)')
+    parser.add_argument('--num_epochs', type=int, default=50, help='number of epochs')
+    parser.add_argument('--grad_clip', type=float, default=10., help='clip gradients at this value')
+    parser.add_argument('--learning_rate', type=float, default=0.003, help='learning rate')
+    parser.add_argument('--lambda_param', type=float, default=0.0005, help='L2 regularization parameter')
+    parser.add_argument('--freq_optimizer', type=int, default=8, help='Frequency of learning rate decay')
+
+    # --- その他 ---
+    parser.add_argument('--use_cuda', action="store_true", default=True, help='Use GPU or not')
+    
+    # SocialModelが必要とする固定の引数を設定
     parser.add_argument('--input_size', type=int, default=2)
     parser.add_argument('--output_size', type=int, default=5)
-    parser.add_argument('--rnn_size', type=int, default=128,
-                        help='size of RNN hidden state')
-    # Size of each batch parameter
-    parser.add_argument('--batch_size', type=int, default=5,
-                        help='minibatch size')
-    # Length of sequence to be considered parameter
-    parser.add_argument('--seq_length', type=int, default=20,
-                        help='RNN sequence length')
-    parser.add_argument('--pred_length', type=int, default=12,
-                        help='prediction length')
-    # Number of epochs parameter
-    parser.add_argument('--num_epochs', type=int, default=50,
-                        help='number of epochs')
-    # Frequency at which the model should be saved parameter
-    parser.add_argument('--save_every', type=int, default=400,
-                        help='save frequency')
-    # Gradient value at which it should be clipped
-    parser.add_argument('--grad_clip', type=float, default=10.,
-                        help='clip gradients at this value')
-    # Learning rate parameter
-    parser.add_argument('--learning_rate', type=float, default=0.003,
-                        help='learning rate')
-    # Decay rate for the learning rate parameter
-    parser.add_argument('--decay_rate', type=float, default=0.95,
-                        help='decay rate for rmsprop')
-    # Dropout probability parameter
-    parser.add_argument('--dropout', type=float, default=0.5,
-                        help='dropout probability')
-    # Dimension of the embeddings parameter
-    parser.add_argument('--embedding_size', type=int, default=64,
-                        help='Embedding dimension for the spatial coordinates')
-    # Size of neighborhood to be considered parameter
-    parser.add_argument('--neighborhood_size', type=int, default=32,
-                        help='Neighborhood size to be considered for social grid')
-    # Size of the social grid parameter
-    parser.add_argument('--grid_size', type=int, default=4,
-                        help='Grid size of the social grid')
-    # Cuda parameter
-    parser.add_argument('--use_cuda', action="store_true", default=False,
-                        help='Use GPU or not')
-    # GRU parameter
-    parser.add_argument('--gru', action="store_true", default=False,
-                        help='True : GRU cell, False: LSTM cell')
-    # number of validation will be used
-    parser.add_argument('--num_validation', type=int, default=2,
-                        help='Total number of validation dataset for validate accuracy')
-    # frequency of validation
-    parser.add_argument('--freq_validation', type=int, default=1,
-                        help='Frequency number(epoch) of validation using validation data')
-    # frequency of optimazer learning decay
-    parser.add_argument('--freq_optimizer', type=int, default=8,
-                        help='Frequency number(epoch) of learning decay for optimizer')
-    # store grids in epoch 0 and use further.2 times faster -> Intensive memory use around 12 GB
-    parser.add_argument('--grid', action="store_true", default=True,
-                        help='Whether store grids and use further epoch')
-    parser.add_argument('--forcePreProcess', action="store_true", default=False,
-                        help='Force preprocess the data again')
-
+    parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('--maxNumPeds', type=int, default=100) # 十分に大きな値
+    
     args = parser.parse_args()
     
+    # seq_lengthはobs_lengthとpred_lengthから自動計算
+    args.seq_length = args.obs_length + args.pred_length
     train(args)
 
-
 def train(args):
-    # ログ・モデル保存用のディレクトリ作成
-    os.makedirs("log", exist_ok=True)
-    os.makedirs("model", exist_ok=True)
+    # データセットとデータローダーの準備
+    train_path = os.path.join(args.data_root, 'train')
     
-    # --- 変更点: DataLoaderにデータパス(f_prefix)を渡すように修正 ---
-    dataloader = DataLoader(f_prefix=args.data_root, 
-                            batch_size=args.batch_size, 
-                            seq_length=args.seq_length, 
-                            num_of_validation=args.num_validation, 
-                            forcePreProcess=args.forcePreProcess)
-
-    model_name = "LSTM"
-    method_name = "SOCIALLSTM"
-    save_tar_name = method_name+"_lstm_model_"
-    if args.gru:
-        model_name = "GRU"
-        save_tar_name = method_name+"_gru_model_"
-
-    # 各種ディレクトリパスの設定
-    log_directory = os.path.join('log', method_name, model_name)
-    save_directory = os.path.join('model', method_name, model_name)
-    os.makedirs(log_directory, exist_ok=True)
-    os.makedirs(save_directory, exist_ok=True)
-
-    # Logging files
-    log_file_curve = open(os.path.join(log_directory, 'log_curve.txt'), 'w+')
-    log_file = open(os.path.join(log_directory, 'val.txt'), 'w+')
+    print(f"Loading training data from {train_path}...")
+    train_dataset = TrajectoryDataset(data_dir=train_path, obs_len=args.obs_length, pred_len=args.pred_length)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     
-    # Save the arguments in the config file
-    with open(os.path.join(save_directory,'config.pkl'), 'wb') as f:
-        pickle.dump(args, f)
+    print(f"Found {len(train_dataset)} sequences in the training set.")
 
-    # Path to store the checkpoint file
-    def checkpoint_path(x):
-        return os.path.join(save_directory, save_tar_name+str(x)+'.tar')
-
-    # model creation
+    # モデルの準備
     net = SocialModel(args)
     if args.use_cuda:
         net = net.to(device)
-
-    optimizer = torch.optim.Adagrad(net.parameters())
     
-    # グリッドを保存するためのリスト
-    grids = [[] for _ in range(dataloader.numDatasets)]
+    optimizer = torch.optim.Adagrad(net.parameters(), weight_decay=args.lambda_param)
+    
+    # 保存用ディレクトリの準備
+    model_name = "GRU" if args.gru else "LSTM"
+    save_directory = os.path.join('model', 'SOCIALLSTM', model_name)
+    os.makedirs(save_directory, exist_ok=True)
+    with open(os.path.join(save_directory,'config.pkl'), 'wb') as f:
+        pickle.dump(args, f)
 
     # Training
     for epoch in range(args.num_epochs):
-        print(f'****************Training epoch {epoch+1}/{args.num_epochs} beginning******************')
-        dataloader.reset_batch_pointer(valid=False)
+        net.train()
         loss_epoch = 0
-
-        # For each batch
-        for batch in range(dataloader.num_batches):
-            start = time.time()
-            x, y, d, numPedsList, PedsList, target_ids = dataloader.next_batch()
+        
+        for batch_idx, (abs_traj, mask) in enumerate(train_loader):
+            # DataLoaderはバッチ次元を追加するので、それを削除 (batch_size=1なので)
+            abs_traj = abs_traj.squeeze(0) # (num_peds, seq_len, 2)
+            mask = mask.squeeze(0) # (num_peds, seq_len)
             
-            # バッチが空の場合はスキップ
-            if not x:
-                continue
-
-            loss_batch = 0
-
-            # For each sequence
-            for sequence in range(len(x)): # batch_sizeではなく取得できたシーケンス数でループ
-                x_seq, _, d_seq, numPedsList_seq, PedsList_seq = x[sequence], y[sequence], d[sequence], numPedsList[sequence], PedsList[sequence]
+            if args.use_cuda:
+                abs_traj = abs_traj.to(device)
+                mask = mask.to(device)
                 
-                x_seq_tensor, lookup_seq = dataloader.convert_proper_array(x_seq, numPedsList_seq, PedsList_seq)
-                
-                # シーケンス内に歩行者がいない場合はスキップ
-                if not lookup_seq:
-                    continue
-
-                folder_name = dataloader.get_directory_name_with_pointer(d_seq)
-                dataset_data = dataloader.get_dataset_dimension(folder_name)
-                
-                if args.grid:
-                    if epoch == 0:
-                        grid_seq = getSequenceGridMask(x_seq_tensor, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
-                        grids[d_seq].append(grid_seq)
-                    else:
-                        batch_index = (batch * args.batch_size) + sequence
-                        if batch_index < len(grids[d_seq]):
-                            grid_seq = grids[d_seq][batch_index]
-                        else: # グリッドが保存されていない場合は再計算（安全策）
-                            grid_seq = getSequenceGridMask(x_seq_tensor, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
-                else:
-                    grid_seq = getSequenceGridMask(x_seq_tensor, dataset_data, PedsList_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
-
-                vec_x_seq, _ = vectorize_seq(x_seq_tensor.clone(), PedsList_seq, lookup_seq)
-                
-                if args.use_cuda:
-                    vec_x_seq = vec_x_seq.to(device)
-
-                numNodes = len(lookup_seq)
-                hidden_states = Variable(torch.zeros(numNodes, args.rnn_size)).to(device)
-                cell_states = Variable(torch.zeros(numNodes, args.rnn_size)).to(device)
-
-                net.zero_grad()
-                optimizer.zero_grad()
-                
-                outputs, _, _ = net(vec_x_seq, grid_seq, hidden_states, cell_states, PedsList_seq, numPedsList_seq, dataloader, lookup_seq)
-                
-                loss = Gaussian2DLikelihood(outputs, vec_x_seq, PedsList_seq, lookup_seq)
-                loss_batch += loss.item()
-                loss.backward()
-                
-                torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
-                optimizer.step()
-
-            end = time.time()
-            if len(x) > 0:
-                loss_batch /= len(x)
-                loss_epoch += loss_batch
+            # 絶対座標を相対座標に変換
+            rel_traj, _ = vectorize_seq(abs_traj)
             
-            print(f'{epoch * dataloader.num_batches + batch + 1}/{args.num_epochs * dataloader.num_batches} (epoch {epoch+1}), '
-                  f'train_loss = {loss_batch:.3f}, time/batch = {end - start:.3f}s')
+            # --- Social-LSTMモデルへの入力準備 ---
+            num_peds = rel_traj.shape[0]
+            
+            # モデルの入力形式に合わせる (seq_len, num_peds, 2)
+            full_rel_traj = rel_traj.permute(1, 0, 2)
+            
+            # モデルは古い形式のPedsListとlookup_seqを必要とするため、ダミーを作成
+            peds_list_seq = [list(range(num_peds))] * args.seq_length
+            lookup_seq = {i: i for i in range(num_peds)}
 
-        if dataloader.num_batches > 0:
-            loss_epoch /= dataloader.num_batches
-            log_file_curve.write(f"Training epoch: {epoch+1} loss: {loss_epoch}\n")
+            # グリッドマスクの計算
+            abs_traj_for_grid = abs_traj.permute(1, 0, 2)
+            grid_seq = getSequenceGridMask(abs_traj_for_grid, [720, 576], peds_list_seq, args.neighborhood_size, args.grid_size, args.use_cuda)
 
-        # optimizerの学習率を調整
+            # 隠れ状態の初期化
+            hidden_states = Variable(torch.zeros(num_peds, args.rnn_size)).to(device)
+            cell_states = Variable(torch.zeros(num_peds, args.rnn_size)).to(device)
+
+            # --- フォワードパスとロス計算 ---
+            optimizer.zero_grad()
+            
+            # Social-LSTMはシーケンス全体を入力とする
+            # 入力はt=0からt=18、ターゲットはt=1からt=19
+            outputs, _, _ = net(full_rel_traj[:-1], grid_seq[:-1], hidden_states, cell_states, peds_list_seq[:-1], None, None, lookup_seq)
+            
+            # 損失計算 (ターゲットは1フレームずれる)
+            loss_mask = mask.permute(1,0)[1:] # (seq_len-1, num_peds)
+            loss = Gaussian2DLikelihood(outputs, full_rel_traj[1:], loss_mask)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+            optimizer.step()
+            
+            loss_epoch += loss.item()
+            
+            if batch_idx % 50 == 0:
+                print(f'Epoch [{epoch+1}/{args.num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Loss: {loss.item():.4f}')
+        
+        avg_loss = loss_epoch / len(train_loader)
+        print(f'---- Epoch [{epoch+1}/{args.num_epochs}] summary: Average Loss: {avg_loss:.4f} ----')
+        
+        # 学習率の減衰
         optimizer = time_lr_scheduler(optimizer, epoch, lr_decay_epoch=args.freq_optimizer)
-
-        # Save the model after each epoch
-        if (epoch+1) % 5 == 0: # 5エポックごとに保存
-            print('Saving model checkpoint')
+        
+        # モデルの保存
+        if (epoch+1) % 10 == 0:
+            print('Saving model checkpoint...')
             torch.save({
                 'epoch': epoch+1,
                 'state_dict': net.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict()
-            }, checkpoint_path(epoch+1))
+            }, os.path.join(save_directory, f'SOCIALLSTM_{model_name}_model_{epoch+1}.tar'))
 
     print('Training finished.')
-    log_file.close()
-    log_file_curve.close()
 
 if __name__ == '__main__':
     main()
