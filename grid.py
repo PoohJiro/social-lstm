@@ -35,6 +35,10 @@ def get_grid_mask(frame_data, neighborhood_size, grid_size):
     # 計算したマスクを、有効な歩行者のインデックスに対応する位置に挿入
     valid_indices = torch.where(nan_mask)[0]
     row_indices, col_indices = torch.meshgrid(valid_indices, valid_indices, indexing='ij')
-    full_mask[row_indices, col_indices, :] = mask_nonan.permute(0, 2, 1)
+    
+    # ★★★ バグ修正箇所 ★★★
+    # 不要な .permute() を削除。これで形状が一致する。
+    full_mask[row_indices, col_indices, :] = mask_nonan
     
     return full_mask
+
