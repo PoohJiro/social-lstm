@@ -2,8 +2,6 @@ import importlib
 import sys
 
 # --- ★★★ キャッシュクリアのためのコード ★★★ ---
-# 開発中にローカルの.pyファイルを変更した場合、
-# このコードがPythonに強制的に最新版を再読み込みさせます。
 if 'utils' in sys.modules:
     importlib.reload(sys.modules['utils'])
 if 'model' in sys.modules:
@@ -23,7 +21,9 @@ import pickle
 
 from model import SocialModel
 from utils import TrajectoryDataset
-from grid import getSequenceGridMask
+# --- ★★★ 高速化対応 ★★★ ---
+# 新しいベクトル化された関数をインポートします
+from grid import get_grid_mask_vectorized as getSequenceGridMask
 
 def bivariate_loss(V_pred, V_trgt):
     """二変量正規分布の負の対数尤度損失を計算する"""
@@ -66,10 +66,9 @@ def vald(model, loader, args, device):
             full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
             full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
             
-            grids = []
-            for t in range(args.obs_len + args.pred_len - 1):
-                grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
-                grids.append(grid)
+            # --- ★★★ 高速化対応 ★★★ ---
+            # ループを削除し、一度の呼び出しで全グリッドを計算
+            grids = getSequenceGridMask(full_traj_abs_input, args.neighborhood_size, args.grid_size, args.use_cuda)
 
             hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
             cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -90,9 +89,7 @@ def vald(model, loader, args, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    # --- ★★★ 高速化のための引数を追加 ★★★ ---
-    parser.add_argument('--accumulation_steps', type=int, default=64, help='Number of steps to accumulate gradients before updating weights.')
-    
+    parser.add_argument('--accumulation_steps', type=int, default=32, help='(Optional) Number of steps to accumulate gradients.')
     parser.add_argument('--input_size', type=int, default=2)
     parser.add_argument('--output_size', type=int, default=5) 
     parser.add_argument('--embedding_size', type=int, default=64)
@@ -171,7 +168,6 @@ def main():
         model.train()
         print(f"--- Epoch {epoch}/{args.num_epochs} Train ---")
         
-        # --- ★★★ 勾配累積のための修正 ★★★ ---
         optimizer.zero_grad()
         
         for dset_name, dset_train in train_datasets:
@@ -192,10 +188,9 @@ def main():
                 full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
                 full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
                 
-                grids = []
-                for t in range(args.obs_len + args.pred_len - 1):
-                    grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
-                    grids.append(grid)
+                # --- ★★★ 高速化対応 ★★★ ---
+                # ループを削除し、一度の呼び出しで全グリッドを計算
+                grids = getSequenceGridMask(full_traj_abs_input, args.neighborhood_size, args.grid_size, args.use_cuda)
 
                 hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
                 cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -206,20 +201,18 @@ def main():
                 full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
                 pred_outputs = full_outputs[args.obs_len-1:]
                 
-                # 損失を正規化し、累積する
                 loss = bivariate_loss(pred_outputs, pred_traj_gt_rel) / args.accumulation_steps
                 
-                epoch_total_loss += loss.item() * args.accumulation_steps # 正規化を戻して記録
+                epoch_total_loss += loss.item() * args.accumulation_steps
                 loss.backward()
                 
-                # 指定した回数ごとに重みを更新
                 if (batch_idx + 1) % args.accumulation_steps == 0:
                     if args.clip_grad is not None:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
                     optimizer.step()
                     optimizer.zero_grad()
 
-        avg_train_loss = epoch_total_loss / total_train_samples
+        avg_train_loss = epoch_total_loss / total_train_samples if total_train_samples > 0 else 0
         
         val_loss = vald(model, loader_val, args, device)
         
