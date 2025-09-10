@@ -3,131 +3,138 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 
-def read_file(_path, delim=' '):
-    """ファイルからデータを読み込む。空のファイルに対応。"""
+def read_file(_path, delim='\t'):
+    """ファイルからデータを読み込む。区切り文字はタブまたはスペースを想定。"""
     data = []
+    if delim == 'tab':
+        delim = '\t'
+    elif delim == 'space':
+        delim = ' '
     with open(_path, 'r') as f:
         for line in f:
-            # 修正点1: スペースとタブの両方に対応するため、区切り文字を指定せずに分割
-            line = line.strip().split()
-            if len(line) < 4: continue
+            line = line.strip().split(delim)
             line = [float(i) for i in line]
             data.append(line)
-    
-    if not data:
-        return np.empty((0, 4))
-        
     return np.asarray(data)
 
+def poly_fit(traj, traj_len, threshold):
+    """軌道が線形かどうかをチェックする"""
+    t = np.linspace(0, traj_len - 1, traj_len)
+    res_x = np.polyfit(t, traj[:, 0], 2, full=True)[1]
+    res_y = np.polyfit(t, traj[:, 1], 2, full=True)[1]
+    return (res_x + res_y) > threshold
+
 class TrajectoryDataset(Dataset):
-    """
-    Dataloder for the Trajectory datasets
-    """
-    def __init__(self, data_dir, obs_len=8, pred_len=12, skip=1, min_ped=1):
+    """軌道データセットのためのDataloader"""
+    def __init__(self, data_dir, obs_len=8, pred_len=12, skip=1, threshold=0.002, min_ped=1, delim='\t'):
         super(TrajectoryDataset, self).__init__()
 
+        self.data_dir = data_dir
         self.obs_len = obs_len
         self.pred_len = pred_len
         self.skip = skip
         self.seq_len = self.obs_len + self.pred_len
         self.min_ped = min_ped
+        self.delim = delim
+        self.threshold = threshold
 
-        self.sequences = []
-        all_files = sorted([os.path.join(data_dir, path) for path in os.listdir(data_dir) if path.endswith('.txt')])
+        all_files = [os.path.join(self.data_dir, _path) for _path in os.listdir(self.data_dir) if _path.endswith('.txt')]
+        num_peds_in_seq = []
+        seq_list = []
+        seq_list_rel = []
+        loss_mask_list = []
+        non_linear_ped = []
         
         for path in all_files:
-            # Load data for a single file
-            raw_data = read_file(path)
-            if raw_data.shape[0] == 0:
-                continue
-
-            # Social-LSTM format expects [frame, ped, x, y], original is [frame, ped, y, x]
-            data = raw_data[:, [0, 1, 3, 2]] if raw_data.shape[1] == 4 else raw_data
-
+            data = read_file(path, self.delim)
             frames = np.unique(data[:, 0]).tolist()
-            frame_data = {frame: data[data[:, 0] == frame, :] for frame in frames}
+            frame_data = [data[frame == data[:, 0], :] for frame in frames]
             
-            num_frames = len(frames)
-            
-            # Iterate through all possible start frames
-            for i in range(0, num_frames - self.seq_len + 1, self.skip):
-                # Get the frames for the current sequence window
-                curr_seq_frames = frames[i:i + self.seq_len]
-                
-                # Ensure frames have a consistent step size (handles frame skips)
-                frame_diffs = np.diff(curr_seq_frames)
-                if len(frame_diffs) > 0 and not np.all(frame_diffs == frame_diffs[0]):
-                    continue
+            num_sequences = int(np.ceil((len(frames) - self.seq_len + 1) / skip))
 
-                # Concatenate data for the current sequence window
-                curr_seq_data = np.concatenate([frame_data[f] for f in curr_seq_frames], axis=0)
+            for idx in range(0, num_sequences * self.skip, self.skip):
+                curr_seq_data = np.concatenate(frame_data[idx:idx + self.seq_len], axis=0)
+                peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
+                curr_seq_rel = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
+                curr_seq = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
+                curr_loss_mask = np.zeros((self.seq_len, len(peds_in_curr_seq)))
+                num_peds_considered = 0
+                _non_linear_ped = []
                 
-                peds_in_seq = np.unique(curr_seq_data[:, 1])
-                
-                if len(peds_in_seq) < self.min_ped:
-                    continue
-
-                # Initialize the sequence array for all peds in this window
-                seq_abs = np.full((len(peds_in_seq), self.seq_len, 2), np.nan)
-                
-                for ped_idx, ped_id in enumerate(peds_in_seq):
-                    # Get data for the current pedestrian
-                    ped_seq_data = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
+                for _, ped_id in enumerate(peds_in_curr_seq):
+                    curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
+                    pad_front = frames.index(curr_ped_seq[0, 0]) - idx
+                    pad_end = frames.index(curr_ped_seq[-1, 0]) - idx + 1
                     
-                    # A pedestrian must be present for the entire sequence length
-                    if ped_seq_data.shape[0] != self.seq_len:
+                    if pad_end - pad_front != self.seq_len:
                         continue
-                    
-                    # 修正点2: 正しい軌道順序を保証するため、フレーム番号でソート
-                    ped_seq_data = ped_seq_data[ped_seq_data[:, 0].argsort()]
-                        
-                    # Add the trajectory to the sequence array
-                    seq_abs[ped_idx, :, :] = ped_seq_data[:, 2:]
 
-                # Remove pedestrians who had missing frames (rows that still have NaNs)
-                valid_ped_mask = ~np.isnan(seq_abs).any(axis=(1, 2))
-                
-                if np.sum(valid_ped_mask) >= self.min_ped:
-                    self.sequences.append(seq_abs[valid_ped_mask])
+                    curr_ped_seq = np.transpose(curr_ped_seq[:, 2:])
+                    _idx = num_peds_considered
+                    curr_seq[:self.seq_len, _idx, :] = curr_ped_seq
+                    
+                    if curr_ped_seq.shape[1] > 1:
+                        rel_curr_ped_seq = np.zeros_like(curr_ped_seq)
+                        rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
+                        curr_seq_rel[:self.seq_len, _idx, :] = rel_curr_ped_seq
+
+                    # 線形でない歩行者をチェック
+                    is_non_linear = poly_fit(curr_ped_seq.T, self.pred_len, self.threshold)
+                    _non_linear_ped.append(is_non_linear)
+                    curr_loss_mask[:self.seq_len, _idx] = 1
+                    num_peds_considered += 1
+
+                if num_peds_considered > self.min_ped:
+                    num_peds_in_seq.append(num_peds_considered)
+                    non_linear_ped += _non_linear_ped
+                    seq_list.append(curr_seq[:, :num_peds_considered, :])
+                    seq_list_rel.append(curr_seq_rel[:, :num_peds_considered, :])
+                    loss_mask_list.append(curr_loss_mask[:, :num_peds_considered])
+
+        self.num_seq = len(seq_list)
+        seq_list = np.concatenate(seq_list, axis=1)
+        seq_list_rel = np.concatenate(seq_list_rel, axis=1)
+        loss_mask_list = np.concatenate(loss_mask_list, axis=1)
+        non_linear_ped = np.asarray(non_linear_ped)
+
+        # テンソルに変換
+        self.obs_traj = torch.from_numpy(seq_list[:self.obs_len, :, :]).type(torch.float)
+        self.pred_traj = torch.from_numpy(seq_list[self.obs_len:, :, :]).type(torch.float)
+        self.obs_traj_rel = torch.from_numpy(seq_list_rel[:self.obs_len, :, :]).type(torch.float)
+        self.pred_traj_rel = torch.from_numpy(seq_list_rel[self.obs_len:, :, :]).type(torch.float)
+        self.loss_mask = torch.from_numpy(loss_mask_list).type(torch.float)
+        self.non_linear_ped = torch.from_numpy(non_linear_ped).type(torch.float)
+        
+        cum_start_idx = [0] + np.cumsum(num_peds_in_seq).tolist()
+        self.seq_start_end = [(start, end) for start, end in zip(cum_start_idx, cum_start_idx[1:])]
 
     def __len__(self):
-        return len(self.sequences)
+        return self.num_seq
 
     def __getitem__(self, index):
-        abs_seq = self.sequences[index]
+        start, end = self.seq_start_end[index]
         
-        rel_seq = np.zeros_like(abs_seq)
-        rel_seq[:, 1:, :] = abs_seq[:, 1:, :] - abs_seq[:, :-1, :]
+        # 10個のテンソルを準備
+        out = [
+            self.obs_traj[:, start:end, :], self.pred_traj[:, start:end, :],
+            self.obs_traj_rel[:, start:end, :], self.pred_traj_rel[:, start:end, :],
+            self.non_linear_ped[start:end], self.loss_mask[:, start:end],
+        ]
         
-        obs_traj_abs = torch.from_numpy(abs_seq[:, :self.obs_len, :]).float()
-        pred_traj_abs = torch.from_numpy(abs_seq[:, self.obs_len:, :]).float()
-        obs_traj_rel = torch.from_numpy(rel_seq[:, :self.obs_len, :]).float()
-        pred_traj_rel = torch.from_numpy(rel_seq[:, self.obs_len:, :]).float()
+        # 速度と隣接行列を追加
+        v_obs = out[2].permute(1, 0, 2)
+        v_pred = out[3].permute(1, 0, 2)
         
-        return obs_traj_abs, pred_traj_abs, obs_traj_rel, pred_traj_rel
-
-def seq_collate(data):
-    """
-    Custom collate function for DataLoader to handle variable-sized sequences.
-    """
-    (obs_traj_list, pred_traj_list, obs_traj_rel_list, pred_traj_rel_list) = zip(*data)
-    
-    _len = [seq.size(0) for seq in obs_traj_list]
-    cum_start_idx = [0] + np.cumsum(_len).tolist()
-    seq_start_end = [[start, end] for start, end in zip(cum_start_idx, cum_start_idx[1:])]
-    
-    obs_traj = torch.cat(obs_traj_list, dim=0).permute(1, 0, 2)
-    pred_traj = torch.cat(pred_traj_list, dim=0).permute(1, 0, 2)
-    obs_traj_rel = torch.cat(obs_traj_rel_list, dim=0).permute(1, 0, 2)
-    pred_traj_rel = torch.cat(pred_traj_rel_list, dim=0).permute(1, 0, 2)
-    
-    seq_start_end = torch.LongTensor(seq_start_end)
-    loss_mask = torch.ones(pred_traj.size(1), pred_traj.size(0)).permute(1, 0)
-    non_linear_ped = torch.zeros(pred_traj.size(1))
-    
-    out = [
-        obs_traj, pred_traj, obs_traj_rel, pred_traj_rel,
-        non_linear_ped, loss_mask, seq_start_end
-    ]
-    
-    return tuple(out)
+        num_peds = v_obs.size(0)
+        obs_len = v_obs.size(1)
+        pred_len = v_pred.size(1)
+        
+        a_obs = torch.ones(num_peds, num_peds)
+        a_pred = torch.ones(num_peds, num_peds)
+        
+        out.append(v_obs.contiguous())
+        out.append(a_obs.contiguous())
+        out.append(v_pred.contiguous())
+        out.append(a_pred.contiguous())
+        
+        return out
