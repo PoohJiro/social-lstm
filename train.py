@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 import numpy as np
 import argparse
 import os
@@ -27,8 +27,8 @@ def train_epoch(model, loader_train, optimizer, args):
         obs_abs, pred_gt_abs, obs_rel = [t.to(device) for t in batch]
         
         pred_gt_rel = torch.zeros_like(pred_gt_abs)
-        pred_gt_rel[:, :, 0, :, :] = pred_gt_abs[:, :, 0, :, :] - obs_abs[:, :, -1, :, :]
-        pred_gt_rel[:, :, 1:, :, :] = pred_gt_abs[:, :, 1:, :, :] - pred_gt_abs[:, :, :-1, :, :]
+        pred_gt_rel[:, 0, :, :] = pred_gt_abs[:, 0, :, :] - obs_abs[:, -1, :, :]
+        pred_gt_rel[:, 1:, :, :] = pred_gt_abs[:, 1:, :, :] - pred_gt_abs[:, :-1, :, :]
 
         grids = []
         for t in range(args.obs_len):
@@ -50,11 +50,11 @@ def train_epoch(model, loader_train, optimizer, args):
 
     return epoch_loss / len(loader_train)
 
-def test_epoch(model, loader_val, args):
+def test_epoch(model, loader_test, args):
     model.eval()
     total_ade, total_fde = 0, 0
     with torch.no_grad():
-        for batch in loader_val:
+        for batch in loader_test:
             obs_abs, pred_gt_abs, obs_rel = [t.to(device) for t in batch]
             
             grids = []
@@ -78,14 +78,14 @@ def test_epoch(model, loader_val, args):
             total_ade += ade.item()
             total_fde += fde.item()
 
-    avg_ade = total_ade / len(loader_val)
-    avg_fde = total_fde / len(loader_val)
+    avg_ade = total_ade / len(loader_test)
+    avg_fde = total_fde / len(loader_test)
     return avg_ade, avg_fde
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', default='./datasets', help='Path to dataset directory')
-    parser.add_argument('--dataset_val', default='eth', help='Dataset to use for validation')
+    parser.add_argument('--dataset', default='eth', help='Dataset to train and test on (eth, hotel, zara1, zara2, univ)')
     parser.add_argument('--obs_len', type=int, default=8)
     parser.add_argument('--pred_len', type=int, default=12)
     parser.add_argument('--batch_size', type=int, default=8)
@@ -100,19 +100,21 @@ def main():
     args = parser.parse_args()
 
     # --- Data prep ---
-    all_datasets = ['eth', 'hotel', 'zara01', 'zara02', 'univ']
-    train_paths = [os.path.join(args.data_path, name, 'train') for name in all_datasets]
-    train_datasets = [TrajectoryDataset(path, obs_len=args.obs_len, pred_len=args.pred_len) for path in train_paths]
+    # この構造では、指定されたデータセットのtrain/test(val)フォルダを直接使う
+    train_path = os.path.join(args.data_path, args.dataset, 'train')
+    test_path = os.path.join(args.data_path, args.dataset, 'test') # testフォルダを使用
+    # testフォルダがない場合はvalフォルダを試す
+    if not os.path.exists(test_path):
+        test_path = os.path.join(args.data_path, args.dataset, 'val')
+
+    print(f"--- Training with: {train_path} ---")
+    print(f"--- Testing with: {test_path} ---")
+
+    dset_train = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len)
+    loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
     
-    print(f"--- Combining {len(train_datasets)} training datasets ---")
-    concat_train_dataset = ConcatDataset(train_datasets)
-    loader_train = DataLoader(concat_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
-    
-    val_path = os.path.join(args.data_path, args.dataset_val, 'val')
-    dset_val = TrajectoryDataset(val_path, obs_len=args.obs_len, pred_len=args.pred_len)
-    loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=seq_collate)
-    
-    print(f"--- Validating on: {args.dataset_val}/val ---")
+    dset_test = TrajectoryDataset(test_path, obs_len=args.obs_len, pred_len=args.pred_len)
+    loader_test = DataLoader(dset_test, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=seq_collate)
 
     # --- Training ---
     model = SocialModel(args).to(device)
@@ -121,13 +123,13 @@ def main():
     best_ade = float('inf')
     for epoch in range(args.num_epochs):
         train_loss = train_epoch(model, loader_train, optimizer, args)
-        val_ade, val_fde = test_epoch(model, loader_val, args)
-        print(f"Epoch {epoch+1}/{args.num_epochs}, Train Loss: {train_loss:.4f}, Val ADE: {val_ade:.4f}, Val FDE: {val_fde:.4f}")
+        test_ade, test_fde = test_epoch(model, loader_test, args)
+        print(f"Epoch {epoch+1}/{args.num_epochs}, Train Loss: {train_loss:.4f}, Test ADE: {test_ade:.4f}, Test FDE: {test_fde:.4f}")
 
-        if val_ade < best_ade:
-            best_ade = val_ade
+        if test_ade < best_ade:
+            best_ade = test_ade
             print(f"Saving best model with ADE: {best_ade:.4f}")
-            torch.save(model.state_dict(), f'social_lstm_all_train_val_on_{args.dataset_val}_best.pth')
+            torch.save(model.state_dict(), f'social_lstm_best_{args.dataset}.pth')
 
 if __name__ == '__main__':
     main()
