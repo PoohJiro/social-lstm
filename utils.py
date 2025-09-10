@@ -95,5 +95,34 @@ class TrajectoryDataset(Dataset):
 
         return obs_traj, pred_traj, obs_traj_rel, peds_list, lookup
 
+def seq_collate(data):
+    """バッチ内の可変長の歩行者数をパディングして揃えるための関数"""
+    (obs_traj_list, pred_traj_list, obs_traj_rel_list, peds_list_list, lookup_list) = zip(*data)
+
+    # バッチ内の最大歩行者数を取得
+    max_peds = max([obs.shape[1] for obs in obs_traj_list])
+    obs_len = obs_traj_list[0].shape[0]
+    pred_len = pred_traj_list[0].shape[0]
+    batch_size = len(obs_traj_list)
+
+    # パディングされたテンソルを準備
+    obs_traj = torch.full((batch_size, obs_len, max_peds, 2), float('nan'))
+    pred_traj = torch.full((batch_size, pred_len, max_peds, 2), float('nan'))
+    obs_traj_rel = torch.full((batch_size, obs_len, max_peds, 2), float('nan'))
+
+    # パディングされたリストを準備
+    peds_list = []
+    lookup = []
+
+    for i in range(batch_size):
+        num_peds = obs_traj_list[i].shape[1]
+        obs_traj[i, :, :num_peds, :] = obs_traj_list[i]
+        pred_traj[i, :, :num_peds, :] = pred_traj_list[i]
+        obs_traj_rel[i, :, :num_peds, :] = obs_traj_rel_list[i]
+        peds_list.append(peds_list_list[i])
+        lookup.append(lookup_list[i])
+
+    return obs_traj, pred_traj, obs_traj_rel, peds_list, lookup
+
 
 
