@@ -1,3 +1,17 @@
+import importlib
+import sys
+
+# --- ★★★ キャッシュクリアのためのコード ★★★ ---
+# 開発中にローカルの.pyファイルを変更した場合、
+# このコードがPythonに強制的に最新版を再読み込みさせます。
+if 'utils' in sys.modules:
+    importlib.reload(sys.modules['utils'])
+if 'model' in sys.modules:
+    importlib.reload(sys.modules['model'])
+if 'grid' in sys.modules:
+    importlib.reload(sys.modules['grid'])
+# --- ここまで ---
+
 import argparse
 import os
 import time
@@ -32,58 +46,6 @@ def bivariate_loss(V_pred, V_trgt):
     
     loss = (log_pi_sig_sqrt + exponent).sum()
     return loss
-
-def train(epoch, model, loader, optimizer, args, device):
-    model.train()
-    total_loss = 0
-    loader_len = len(loader)
-    for batch_idx, batch in enumerate(loader):
-        (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
-         loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
-
-        obs_traj = obs_traj.squeeze(0).to(device)
-        pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
-        obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
-        pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).to(device)
-        
-        num_peds = obs_traj.size(1)
-
-        full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
-        full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
-        
-        grids = []
-        for t in range(args.obs_len + args.pred_len - 1):
-            grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
-            grids.append(grid)
-
-        hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
-        cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
-        
-        peds_list = [torch.arange(num_peds).to(device) for _ in range(args.obs_len + args.pred_len)]
-        lookup = {i: i for i in range(num_peds)}
-
-        optimizer.zero_grad()
-        
-        full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
-        
-        pred_outputs = full_outputs[args.obs_len-1:]
-
-        loss = bivariate_loss(pred_outputs, pred_traj_gt_rel)
-        total_loss += loss.item()
-        
-        loss.backward()
-        
-        if args.clip_grad is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-        
-        optimizer.step()
-
-        # --- ★★★ 進捗表示機能 ★★★ ---
-        if (batch_idx + 1) % 100 == 0:
-            print(f'  Epoch {epoch} | Batch [{batch_idx + 1}/{loader_len}] | Loss: {loss.item() / num_peds:.4f}')
-
-    avg_loss = total_loss / len(loader.dataset) if len(loader.dataset) > 0 else 0
-    return avg_loss
 
 def vald(model, loader, args, device):
     """検証ループ関数"""
@@ -128,6 +90,9 @@ def vald(model, loader, args, device):
 
 def main():
     parser = argparse.ArgumentParser()
+    # --- ★★★ 高速化のための引数を追加 ★★★ ---
+    parser.add_argument('--accumulation_steps', type=int, default=64, help='Number of steps to accumulate gradients before updating weights.')
+    
     parser.add_argument('--input_size', type=int, default=2)
     parser.add_argument('--output_size', type=int, default=5) 
     parser.add_argument('--embedding_size', type=int, default=64)
@@ -165,7 +130,7 @@ def main():
             try:
                 dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
                 if len(dset) > 0:
-                    train_datasets.append(dset)
+                    train_datasets.append((name, dset))
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
             except (IndexError, ValueError) as e:
                 print(f"  - Error loading {name} train data: {e}. Skipping.")
@@ -184,13 +149,11 @@ def main():
         print("No valid training data found. Exiting.")
         return
 
-    dset_train = ConcatDataset(train_datasets)
     dset_val = ConcatDataset(val_datasets)
-    
-    loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
     loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False)
-
-    print(f"Total training sequences: {len(dset_train)}")
+    
+    total_train_samples = sum(len(d[1]) for d in train_datasets)
+    print(f"Total training sequences: {total_train_samples}")
     print(f"Total validation sequences: {len(dset_val)}")
 
     model = SocialModel(args).to(device)
@@ -204,10 +167,63 @@ def main():
     print("******************************")
     print("Training initiating....")
     for epoch in range(1, args.num_epochs + 1):
-        train_loss = train(epoch, model, loader_train, optimizer, args, device)
+        epoch_total_loss = 0
+        model.train()
+        print(f"--- Epoch {epoch}/{args.num_epochs} Train ---")
+        
+        # --- ★★★ 勾配累積のための修正 ★★★ ---
+        optimizer.zero_grad()
+        
+        for dset_name, dset_train in train_datasets:
+            loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
+            print(f"  Training on: {dset_name}")
+            
+            for batch_idx, batch in enumerate(loader_train):
+                (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
+                 loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
+
+                obs_traj = obs_traj.squeeze(0).to(device)
+                pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
+                obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
+                pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).to(device)
+                
+                num_peds = obs_traj.size(1)
+
+                full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
+                full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
+                
+                grids = []
+                for t in range(args.obs_len + args.pred_len - 1):
+                    grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
+                    grids.append(grid)
+
+                hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
+                cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
+                
+                peds_list = [torch.arange(num_peds).to(device) for _ in range(args.obs_len + args.pred_len)]
+                lookup = {i: i for i in range(num_peds)}
+
+                full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
+                pred_outputs = full_outputs[args.obs_len-1:]
+                
+                # 損失を正規化し、累積する
+                loss = bivariate_loss(pred_outputs, pred_traj_gt_rel) / args.accumulation_steps
+                
+                epoch_total_loss += loss.item() * args.accumulation_steps # 正規化を戻して記録
+                loss.backward()
+                
+                # 指定した回数ごとに重みを更新
+                if (batch_idx + 1) % args.accumulation_steps == 0:
+                    if args.clip_grad is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+        avg_train_loss = epoch_total_loss / total_train_samples
+        
         val_loss = vald(model, loader_val, args, device)
         
-        print(f"Epoch {epoch} Summary | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch} Summary | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
