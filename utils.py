@@ -2,12 +2,10 @@
 import os
 import torch
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 def read_file(_path, delim='\t'):
     data = []
-    if delim == 'tab': delim = '\t'
-    elif delim == 'space': delim = ' '
     with open(_path, 'r') as f:
         for line in f:
             line = line.strip().split(delim)
@@ -24,34 +22,40 @@ class TrajectoryDataset(Dataset):
         self.skip = skip
         self.seq_len = self.obs_len + self.pred_len
         self.min_ped = min_ped
-        self.delim = delim
 
+        # ディレクトリ内の全ての.txtファイルを読み込む
         all_files = [os.path.join(self.data_dir, path) for path in os.listdir(self.data_dir) if path.endswith('.txt')]
         
-        seq_list_abs = []
+        all_data = []
         for path in all_files:
-            data = read_file(path, self.delim)
-            frames = np.unique(data[:, 0]).tolist()
-            frame_data = [data[frame == data[:, 0], :] for frame in frames]
+            data = read_file(path, delim)
+            all_data.append(data)
+        
+        # 読み込んだ全データを結合
+        cumulative_data = np.concatenate(all_data, axis=0)
+        
+        seq_list_abs = []
+        frames = np.unique(cumulative_data[:, 0]).tolist()
+        frame_data = [cumulative_data[frame == cumulative_data[:, 0], :] for frame in frames]
+        
+        num_sequences = (len(frames) - self.seq_len + 1) // self.skip
+
+        for idx in range(0, num_sequences * self.skip, self.skip):
+            curr_seq_data = np.concatenate(frame_data[idx:idx + self.seq_len], axis=0)
+            peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
+            curr_seq_abs = np.zeros((len(peds_in_curr_seq), self.seq_len, 2))
+            num_peds_considered = 0
             
-            num_sequences = (len(frames) - self.seq_len + 1) // self.skip
-
-            for idx in range(0, num_sequences * self.skip, self.skip):
-                curr_seq_data = np.concatenate(frame_data[idx:idx + self.seq_len], axis=0)
-                peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
-                curr_seq_abs = np.zeros((len(peds_in_curr_seq), self.seq_len, 2))
-                num_peds_considered = 0
+            for ped_idx, ped_id in enumerate(peds_in_curr_seq):
+                curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
+                if len(curr_ped_seq) != self.seq_len:
+                    continue
                 
-                for ped_idx, ped_id in enumerate(peds_in_curr_seq):
-                    curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
-                    if len(curr_ped_seq) != self.seq_len:
-                        continue
-                    
-                    curr_seq_abs[num_peds_considered, :, :] = curr_ped_seq[:, 2:]
-                    num_peds_considered += 1
+                curr_seq_abs[num_peds_considered, :, :] = curr_ped_seq[:, 2:]
+                num_peds_considered += 1
 
-                if num_peds_considered >= self.min_ped:
-                    seq_list_abs.append(curr_seq_abs[:num_peds_considered])
+            if num_peds_considered >= self.min_ped:
+                seq_list_abs.append(curr_seq_abs[:num_peds_considered])
 
         self.num_seq = len(seq_list_abs)
         self.seq_list_abs = seq_list_abs
@@ -61,7 +65,6 @@ class TrajectoryDataset(Dataset):
 
     def __getitem__(self, index):
         abs_seq = self.seq_list_abs[index]
-        
         rel_seq = np.zeros_like(abs_seq)
         rel_seq[:, 1:, :] = abs_seq[:, 1:, :] - abs_seq[:, :-1, :]
         
