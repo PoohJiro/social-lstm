@@ -8,7 +8,8 @@ def read_file(_path, delim=' '):
     data = []
     with open(_path, 'r') as f:
         for line in f:
-            line = line.strip().split(delim)
+            # 修正点1: スペースとタブの両方に対応するため、区切り文字を指定せずに分割
+            line = line.strip().split()
             if len(line) < 4: continue
             line = [float(i) for i in line]
             data.append(line)
@@ -76,6 +77,9 @@ class TrajectoryDataset(Dataset):
                     # A pedestrian must be present for the entire sequence length
                     if ped_seq_data.shape[0] != self.seq_len:
                         continue
+                    
+                    # 修正点2: 正しい軌道順序を保証するため、フレーム番号でソート
+                    ped_seq_data = ped_seq_data[ped_seq_data[:, 0].argsort()]
                         
                     # Add the trajectory to the sequence array
                     seq_abs[ped_idx, :, :] = ped_seq_data[:, 2:]
