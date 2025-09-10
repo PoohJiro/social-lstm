@@ -40,19 +40,24 @@ def train(epoch, model, loader, optimizer, args, device):
         (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
          loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
 
-        # ★★★ エラー修正箇所 ★★★
-        # 不要なpermuteを削除し、utils.pyからのデータをそのまま使います
+        # データをデバイスに移動し、不要なバッチ次元を削除
         obs_traj = obs_traj.squeeze(0).to(device)
-        obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
         pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
+        obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
         pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).to(device)
         
         num_peds = obs_traj.size(1)
 
+        # --- ★★★ エラー修正箇所 (Teacher Forcing) ★★★ ---
+        # 1. 観測軌道と正解予測軌道を結合して、モデルへの入力を作成
+        #    モデルはt番目の入力からt+1番目を予測するため、最後の正解データは不要
+        full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
+        full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
+        
+        # 2. 結合した軌道全体に対してグリッドマスクを準備
         grids = []
-        # ループはobs_trajの最初の次元（シーケンス長）を正しく反復します
-        for t in range(args.obs_len):
-            grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size, args.use_cuda)
+        for t in range(args.obs_len + args.pred_len - 1):
+            grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
             grids.append(grid)
 
         hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -63,9 +68,15 @@ def train(epoch, model, loader, optimizer, args, device):
 
         optimizer.zero_grad()
         
-        outputs, _, _ = model(obs_traj_rel, grids, hidden_states, cell_states, peds_list, lookup)
+        # 3. モデルに結合した軌道を一度に渡し、全系列の出力を得る
+        full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
         
-        loss = bivariate_loss(outputs, pred_traj_gt_rel)
+        # 4. モデルの出力から、予測に対応する部分だけを抽出
+        #    (観測期間の終わりから最後の予測まで)
+        pred_outputs = full_outputs[args.obs_len-1:]
+
+        # 5. 抽出した予測と正解データで損失を計算
+        loss = bivariate_loss(pred_outputs, pred_traj_gt_rel)
         total_loss += loss.item()
         
         loss.backward()
