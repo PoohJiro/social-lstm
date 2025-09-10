@@ -13,7 +13,6 @@ def read_file(_path, delim=' '):
             line = [float(i) for i in line]
             data.append(line)
     
-    # ★★★ バグ修正箇所 ★★★
     # ファイルが空だった場合、正しい形状の空の配列を返す
     if not data:
         return np.empty((0, 4))
@@ -28,7 +27,6 @@ class TrajectoryDataset(Dataset):
         self.pred_len = pred_len
         self.seq_len = obs_len + pred_len
 
-        # ★★★ 修正箇所 ★★★
         # ディレクトリ内の.txtファイルを名前順で読み込む
         all_files = sorted([os.path.join(data_dir, path) for path in os.listdir(data_dir) if path.endswith('.txt')])
         
@@ -59,8 +57,9 @@ class TrajectoryDataset(Dataset):
             start_frame = frames[idx]
             end_frame = frames[idx + self.seq_len - 1]
             
-            if end_frame - start_frame != self.seq_len - 1:
-                continue
+            # フレームが連続しているか確認（より頑健なチェック）
+            if end_frame - start_frame != (self.seq_len - 1) * np.mean(np.diff(frames[idx:idx + self.seq_len])):
+                 continue
 
             curr_seq_data = np.concatenate([frame_data[f] for f in frames[idx:idx + self.seq_len]], axis=0)
             peds_in_seq = np.unique(curr_seq_data[:, 1])
@@ -94,44 +93,48 @@ class TrajectoryDataset(Dataset):
         
         return obs_traj_abs, pred_traj_abs, obs_traj_rel
 
-    def seq_collate(data):
-        """
-        DataLoaderのためのカスタムcollate関数
-        バッチ内の可変長データを処理する
-        """
-        obs_traj_list, pred_traj_list, obs_traj_rel_list = zip(*data)
-        
-        # 各シーケンスの歩行者数を取得
-        _len = [seq.size(0) for seq in obs_traj_list]
-        
-        # バッチ内の累積インデックスを計算
-        cum_start_idx = [0] + np.cumsum(_len).tolist()
-        seq_start_end = [[start, end] 
-                         for start, end in zip(cum_start_idx, cum_start_idx[1:])]
-        
-        # テンソルを結合
-        obs_traj = torch.cat(obs_traj_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
-        pred_traj = torch.cat(pred_traj_list, dim=0).permute(1, 0, 2)  # (pred_len, total_peds, 2)
-        obs_traj_rel = torch.cat(obs_traj_rel_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
-        
-        # 相対座標の予測軌道を計算
-        pred_traj_rel = torch.zeros_like(pred_traj)
-        pred_traj_rel[0] = pred_traj[0] - obs_traj[-1]
-        pred_traj_rel[1:] = pred_traj[1:] - pred_traj[:-1]
-        
-        # seq_start_endをテンソルに変換
-        seq_start_end = torch.LongTensor(seq_start_end)
-        
-        # 損失マスクを作成（全て1で初期化）
-        loss_mask = torch.ones(pred_traj.size(0), pred_traj.size(1))
-        
-        # 非線形歩行者のマスク（今回は全て0で初期化）
-        non_linear_ped = torch.zeros(pred_traj.size(1))
-        
-        out = [
-            obs_traj, pred_traj, obs_traj_rel, pred_traj_rel,
-            non_linear_ped, loss_mask, seq_start_end
-        ]
-        
-        return tuple(out)
+# --- 修正箇所 ---
+# `seq_collate`関数をクラスの外に定義します (インデントを解除)
+def seq_collate(data):
+    """
+    DataLoaderのためのカスタムcollate関数
+    バッチ内の可変長データを処理する
+    """
+    obs_traj_list, pred_traj_list, obs_traj_rel_list = zip(*data)
+    
+    # 各シーケンスの歩行者数を取得
+    _len = [seq.size(0) for seq in obs_traj_list]
+    
+    # バッチ内の累積インデックスを計算
+    cum_start_idx = [0] + np.cumsum(_len).tolist()
+    seq_start_end = [[start, end] 
+                     for start, end in zip(cum_start_idx, cum_start_idx[1:])]
+    
+    # テンソルを結合
+    obs_traj = torch.cat(obs_traj_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
+    pred_traj = torch.cat(pred_traj_list, dim=0).permute(1, 0, 2)  # (pred_len, total_peds, 2)
+    obs_traj_rel = torch.cat(obs_traj_rel_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
+    
+    # 相対座標の予測軌道を計算
+    pred_traj_rel = torch.zeros_like(pred_traj)
+    # 最初の予測ステップは、最後の観測ステップからの相対移動
+    pred_traj_rel[0, :, :] = pred_traj[0, :, :] - obs_traj[-1, :, :]
+    # 2番目以降の予測ステップは、直前の予測ステップからの相対移動
+    pred_traj_rel[1:, :, :] = pred_traj[1:, :, :] - pred_traj[:-1, :, :]
+    
+    # seq_start_endをテンソルに変換
+    seq_start_end = torch.LongTensor(seq_start_end)
+    
+    # 損失マスクを作成（全て1で初期化）
+    loss_mask = torch.ones(pred_traj.size(1), pred_traj.size(0)).permute(1, 0)
+    
+    # 非線形歩行者のマスク（今回は全て0で初期化）
+    non_linear_ped = torch.zeros(pred_traj.size(1))
+    
+    out = [
+        obs_traj, pred_traj, obs_traj_rel, pred_traj_rel,
+        non_linear_ped, loss_mask, seq_start_end
+    ]
+    
+    return tuple(out)
     
