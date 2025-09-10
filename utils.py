@@ -13,12 +13,17 @@ def read_file(_path, delim='\t'):
     with open(_path, 'r') as f:
         for line in f:
             line = line.strip().split(delim)
+            # 空行や不正な行をスキップ
+            if not line or len(line) < 4:
+                continue
             line = [float(i) for i in line]
             data.append(line)
     return np.asarray(data)
 
 def poly_fit(traj, traj_len, threshold):
     """軌道が線形かどうかをチェックする"""
+    if traj_len < 2:
+        return False
     t = np.linspace(0, traj_len - 1, traj_len)
     res_x = np.polyfit(t, traj[:, 0], 2, full=True)[1]
     res_y = np.polyfit(t, traj[:, 1], 2, full=True)[1]
@@ -47,6 +52,8 @@ class TrajectoryDataset(Dataset):
         
         for path in all_files:
             data = read_file(path, self.delim)
+            if data.size == 0:
+                continue
             frames = np.unique(data[:, 0]).tolist()
             frame_data = [data[frame == data[:, 0], :] for frame in frames]
             
@@ -78,18 +85,21 @@ class TrajectoryDataset(Dataset):
                         rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
                         curr_seq_rel[:self.seq_len, _idx, :] = rel_curr_ped_seq
 
-                    # 線形でない歩行者をチェック
                     is_non_linear = poly_fit(curr_ped_seq.T, self.pred_len, self.threshold)
                     _non_linear_ped.append(is_non_linear)
                     curr_loss_mask[:self.seq_len, _idx] = 1
                     num_peds_considered += 1
 
-                if num_peds_considered > self.min_ped:
+                if num_peds_considered >= self.min_ped:
                     num_peds_in_seq.append(num_peds_considered)
                     non_linear_ped += _non_linear_ped
                     seq_list.append(curr_seq[:, :num_peds_considered, :])
                     seq_list_rel.append(curr_seq_rel[:, :num_peds_considered, :])
                     loss_mask_list.append(curr_loss_mask[:, :num_peds_considered])
+        
+        if not seq_list:
+            self.num_seq = 0
+            return
 
         self.num_seq = len(seq_list)
         seq_list = np.concatenate(seq_list, axis=1)
@@ -97,7 +107,6 @@ class TrajectoryDataset(Dataset):
         loss_mask_list = np.concatenate(loss_mask_list, axis=1)
         non_linear_ped = np.asarray(non_linear_ped)
 
-        # テンソルに変換
         self.obs_traj = torch.from_numpy(seq_list[:self.obs_len, :, :]).type(torch.float)
         self.pred_traj = torch.from_numpy(seq_list[self.obs_len:, :, :]).type(torch.float)
         self.obs_traj_rel = torch.from_numpy(seq_list_rel[:self.obs_len, :, :]).type(torch.float)
@@ -114,20 +123,16 @@ class TrajectoryDataset(Dataset):
     def __getitem__(self, index):
         start, end = self.seq_start_end[index]
         
-        # 10個のテンソルを準備
         out = [
             self.obs_traj[:, start:end, :], self.pred_traj[:, start:end, :],
             self.obs_traj_rel[:, start:end, :], self.pred_traj_rel[:, start:end, :],
             self.non_linear_ped[start:end], self.loss_mask[:, start:end],
         ]
         
-        # 速度と隣接行列を追加
         v_obs = out[2].permute(1, 0, 2)
         v_pred = out[3].permute(1, 0, 2)
         
         num_peds = v_obs.size(0)
-        obs_len = v_obs.size(1)
-        pred_len = v_pred.size(1)
         
         a_obs = torch.ones(num_peds, num_peds)
         a_pred = torch.ones(num_peds, num_peds)
