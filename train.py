@@ -3,92 +3,15 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset
 import argparse
 import os
+import time
 
-# これまで作成した、書き換え済みのヘルパーファイルをインポート
-from utils import TrajectoryDataset, seq_collate
+# あなたの元のアルゴリズムファイルと、書き換えたデータローダー
 from model import SocialModel
-from grid import get_grid_mask
-from metrics import bivariate_loss, sample_from_bivariate_gaussian, calculate_ade_fde
+from utils import TrajectoryDataset, seq_collate
+from grid import getSequenceGridMask
+from helper import Gaussian2DLikelihood, get_mean_error, get_final_error, getCoef, sample_gaussian_2d
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def rel_to_abs(rel_traj, start_pos):
-    """相対座標を絶対座標に変換する"""
-    # (batch, pred_len, num_peds, 2) -> (batch, num_peds, pred_len, 2)
-    rel_traj = rel_traj.permute(0, 2, 1, 3)
-    abs_traj = torch.zeros_like(rel_traj)
-    current_pos = start_pos.clone()
-    for t in range(rel_traj.shape[2]):
-        current_pos = current_pos + rel_traj[:, :, t, :]
-        abs_traj[:, :, t, :] = current_pos
-    return abs_traj.permute(0, 2, 1, 3)
-
-def train_epoch(model, loader_train, optimizer, args):
-    """1エポック分の学習を行う"""
-    model.train()
-    epoch_loss = 0
-    for batch in loader_train:
-        obs_abs, pred_gt_abs, obs_rel = [t.to(device) for t in batch]
-        
-        # 正解データとなる相対座標を計算
-        pred_gt_rel = torch.zeros_like(pred_gt_abs)
-        pred_gt_rel[:, 0, :, :] = pred_gt_abs[:, 0, :, :] - obs_abs[:, -1, :, :]
-        pred_gt_rel[:, 1:, :, :] = pred_gt_abs[:, 1:, :, :] - pred_gt_abs[:, :-1, :, :]
-
-        # グリッドマスクを計算
-        grids = []
-        for t in range(args.obs_len):
-            frame_data = obs_abs[:, t]
-            batch_grids = [get_grid_mask(frame, args.neighborhood_size, args.grid_size) for frame in frame_data]
-            grids.append(torch.stack(batch_grids, dim=0).unsqueeze(1))
-        grids = torch.cat(grids, dim=1)
-
-        optimizer.zero_grad()
-        # モデルは5次元のパラメータを返す
-        pred_params = model(obs_rel, grids)
-        
-        # 論文の損失関数（二変量ガウス分布の負の対数尤度）を使用
-        loss = bivariate_loss(pred_params, pred_gt_rel)
-        if torch.isnan(loss) or loss.item() == 0: continue
-        
-        loss.backward()
-        
-        # 元のコードにあった勾配クリッピングを適用
-        if args.grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            
-        optimizer.step()
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(loader_train) if len(loader_train) > 0 else 0
-
-def val_epoch(model, loader_val, args):
-    """1エポック分の検証を行う"""
-    model.eval()
-    total_ade, total_fde = 0, 0
-    with torch.no_grad():
-        for batch in loader_val:
-            obs_abs, pred_gt_abs, obs_rel = [t.to(device) for t in batch]
-            
-            grids = []
-            for t in range(args.obs_len):
-                frame_data = obs_abs[:, t]
-                batch_grids = [get_grid_mask(frame, args.neighborhood_size, args.grid_size) for frame in frame_data]
-                grids.append(torch.stack(batch_grids, dim=0).unsqueeze(1))
-            grids = torch.cat(grids, dim=1)
-            
-            pred_params = model(obs_rel, grids)
-            # 評価のために、予測分布から1点をサンプリング
-            pred_fake_rel = sample_from_bivariate_gaussian(pred_params)
-            pred_fake_abs = rel_to_abs(pred_fake_rel, obs_abs[:, -1])
-            
-            ade, fde = calculate_ade_fde(pred_fake_abs, pred_gt_abs)
-            if ade > 0: total_ade += ade
-            if fde > 0: total_fde += fde
-
-    avg_ade = total_ade / len(loader_val) if len(loader_val) > 0 else 0
-    avg_fde = total_fde / len(loader_val) if len(loader_val) > 0 else 0
-    return avg_ade, avg_fde
 
 def main():
     parser = argparse.ArgumentParser()
@@ -100,10 +23,11 @@ def main():
     parser.add_argument('--pred_len', type=int, default=12)
 
     # 学習関連
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=1) # 元のコードは1シーケンスずつ処理
     parser.add_argument('--num_epochs', type=int, default=50)
-    parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--grad_clip', type=float, default=10.0, help='Gradient clipping')
+    parser.add_argument('--lr', type=float, default=0.003)
+    parser.add_argument('--grad_clip', type=float, default=10.0)
+    parser.add_argument('--dropout', type=float, default=0.0)
 
     # モデル関連
     parser.add_argument('--input_size', type=int, default=2)
@@ -113,38 +37,112 @@ def main():
     parser.add_argument('--neighborhood_size', type=float, default=32.0)
     parser.add_argument('--grid_size', type=int, default=4)
     args = parser.parse_args()
+    args.seq_length = args.obs_len + args.pred_len
+    args.use_cuda = torch.cuda.is_available()
 
     # --- 1. データの準備 ---
     all_dataset_names = ['eth', 'hotel', 'zara1', 'zara2', 'univ']
     train_paths = [os.path.join(args.data_path, name, 'train') for name in all_dataset_names]
-    train_datasets = [TrajectoryDataset(path, obs_len=args.obs_len, pred_len=args.pred_len) for path in train_paths]
-    
-    print(f"--- Combining {len(train_datasets)} training datasets ---")
-    concat_train_dataset = ConcatDataset(train_datasets)
-    loader_train = DataLoader(concat_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
-    
     val_path = os.path.join(args.data_path, args.dataset_val, 'val')
+    
+    print(f"--- Combining {len(train_paths)} training datasets ---")
+    dset_train = ConcatDataset([TrajectoryDataset(path, obs_len=args.obs_len, pred_len=args.pred_len) for path in train_paths])
+    loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
+    
     print(f"--- Validating on: {val_path} ---")
     dset_val = TrajectoryDataset(val_path, obs_len=args.obs_len, pred_len=args.pred_len)
-    loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=seq_collate)
+    loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False)
     
     # --- 2. モデルとオプティマイザの準備 ---
-    model = SocialModel(args).to(device)
+    net = SocialModel(args).to(device)
     # 元のコードに合わせてAdagradを使用
-    optimizer = optim.Adagrad(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adagrad(net.parameters(), lr=args.lr)
     
     # --- 3. 学習と検証のループ ---
     best_ade = float('inf')
-    print("--- Starting Training ---")
     for epoch in range(args.num_epochs):
-        train_loss = train_epoch(model, loader_train, optimizer, args)
-        val_ade, val_fde = val_epoch(model, loader_val, args)
-        print(f"Epoch {epoch+1}/{args.num_epochs} -> Train Loss: {train_loss:.4f}, Val ADE: {val_ade:.4f}, Val FDE: {val_fde:.4f}")
+        train(epoch, net, loader_train, optimizer, args)
+        val_ade, val_fde = validate(epoch, net, loader_val, args)
+        print(f"Epoch {epoch+1}/{args.num_epochs} -> Val ADE: {val_ade:.4f}, Val FDE: {val_fde:.4f}")
 
         if val_ade < best_ade:
             best_ade = val_ade
-            print(f"****** Best Val ADE so far: {best_ade:.4f}. Saving model... ******")
-            torch.save(model.state_dict(), f'social_lstm_val_on_{args.dataset_val}_best.pth')
+            print(f"****** Best Val ADE: {best_ade:.4f}. Saving model... ******")
+            torch.save(net.state_dict(), f'social_lstm_val_on_{args.dataset_val}_best.pth')
+
+def train(epoch, net, dataloader, optimizer, args):
+    """元のtrain関数のロジックを再現"""
+    net.train()
+    total_loss = 0
+    for batch in dataloader:
+        # 新しいDataLoaderからの出力を受け取る
+        obs_traj, pred_traj_gt, obs_traj_rel, peds_list, lookup = batch
+        
+        # バッチサイズ1なのでsqueeze(0)で次元を削除
+        obs_traj, pred_traj_gt, obs_traj_rel = [t.squeeze(0).to(device) for t in [obs_traj, pred_traj_gt, obs_traj_rel]]
+        lookup = {k.item(): v.item() for k,v in lookup[0].items()} if isinstance(lookup, list) else lookup
+
+        num_peds = obs_traj.size(1)
+        
+        grids = [getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size) for t in range(args.obs_len)]
+        hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
+        cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
+            
+        optimizer.zero_grad()
+        
+        # 元のmodel.pyのforwardに必要な引数を渡す
+        outputs, _, _ = net(obs_traj_rel, grids, hidden_states, cell_states, peds_list, lookup)
+        
+        # 正解の相対座標を計算
+        pred_traj_gt_rel = torch.zeros_like(pred_traj_gt)
+        pred_traj_gt_rel[0] = pred_traj_gt[0] - obs_traj[-1]
+        pred_traj_gt_rel[1:] = pred_traj_gt[1:] - pred_traj_gt[:-1]
+
+        # 元のhelper.pyの損失関数を使用
+        loss = Gaussian2DLikelihood(outputs, pred_traj_gt_rel, peds_list[args.obs_len:], lookup)
+        if torch.isnan(loss) or loss.item() == 0: continue
+
+        loss.backward()
+        if args.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+        optimizer.step()
+        total_loss += loss.item()
+
+    print(f"TRAIN:\t Epoch: {epoch}\t Loss: {total_loss / len(dataloader):.4f}")
+
+def validate(epoch, net, dataloader, args):
+    """元のvalidationロジックを再現"""
+    net.eval()
+    total_ade, total_fde = 0, 0
+    with torch.no_grad():
+        for batch in dataloader:
+            obs_traj, pred_traj_gt, obs_traj_rel, peds_list, lookup = batch
+            obs_traj, pred_traj_gt, obs_traj_rel = [t.squeeze(0).to(device) for t in [obs_traj, pred_traj_gt, obs_traj_rel]]
+            lookup = {k.item(): v.item() for k,v in lookup[0].items()} if isinstance(lookup, list) else lookup
+
+            num_peds = obs_traj.size(1)
+            grids = [getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size) for t in range(args.obs_len)]
+            hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
+            cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
+            
+            # 予測
+            outputs, _, _ = net(obs_traj_rel, grids, hidden_states, cell_states, peds_list, lookup)
+            
+            # ADE/FDEを計算
+            mux, muy, sx, sy, corr = getCoef(outputs)
+            pred_traj_fake_rel = torch.stack([mux, muy], dim=-1)
+            pred_traj_fake_abs = torch.cumsum(pred_traj_fake_rel, dim=0) + obs_traj[-1]
+            
+            peds_present_at_pred = peds_list[args.obs_len:]
+            ade = get_mean_error(pred_traj_fake_abs, pred_traj_gt, peds_present_at_pred, peds_present_at_pred, args.use_cuda, lookup)
+            fde = get_final_error(pred_traj_fake_abs, pred_traj_gt, peds_present_at_pred, peds_present_at_pred, lookup)
+            
+            if not torch.isnan(ade): total_ade += ade.item()
+            if not torch.isnan(fde): total_fde += fde.item()
+            
+    avg_ade = total_ade / len(dataloader)
+    avg_fde = total_fde / len(dataloader)
+    return avg_ade, avg_fde
 
 if __name__ == '__main__':
     main()
