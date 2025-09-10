@@ -283,21 +283,12 @@ def main():
             skip=1
             # norm_lap_matr=True を削除
         )
-    
-    dset_val = TrajectoryDataset(
-        data_set + 'val/',
-        obs_len=obs_seq_len,
-        pred_len=pred_seq_len,
-        skip=1
-        # norm_lap_matr=True を削除
-    )
-        
         dset_val = TrajectoryDataset(
             data_set + 'val/',
             obs_len=obs_seq_len,
             pred_len=pred_seq_len,
-            skip=1,
-            norm_lap_matr=True
+            skip=1
+            # norm_lap_matr=True を削除
         )
         
         print(f"Dataset: {args.dataset}")
