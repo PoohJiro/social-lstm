@@ -1,4 +1,3 @@
-# grid.py (バグ修正・NaN対応版)
 import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,9 +21,7 @@ def get_grid_mask(frame_data, neighborhood_size, grid_size):
     grid_centers_y = torch.arange(-neighborhood_size / 2 + cell_size / 2, neighborhood_size / 2, cell_size, device=device)
     grid_centers = torch.stack(torch.meshgrid(grid_centers_x, grid_centers_y, indexing='ij'), dim=-1).reshape(-1, 2)
     
-    # 各歩行者中心のグリッドセル座標を計算
     ped_grid_centers = frame_data_nonan.unsqueeze(1) + grid_centers.unsqueeze(0)
-    # 各グリッドセルにどの歩行者がいるかを判定
     dist = ped_grid_centers.unsqueeze(1) - frame_data_nonan.unsqueeze(0).unsqueeze(2)
     
     mask_nonan = (torch.abs(dist[..., 0]) < cell_size / 2) & (torch.abs(dist[..., 1]) < cell_size / 2)
@@ -37,8 +34,8 @@ def get_grid_mask(frame_data, neighborhood_size, grid_size):
     row_indices, col_indices = torch.meshgrid(valid_indices, valid_indices, indexing='ij')
     
     # ★★★ バグ修正箇所 ★★★
-    # 不要な .permute() を削除。これで形状が一致する。
-    full_mask[row_indices, col_indices, :] = mask_nonan
+    # Bool型のmask_nonanを.float()でFloat型に変換してから代入する
+    full_mask[row_indices, col_indices, :] = mask_nonan.float().permute(0,2,1)
     
     return full_mask
 
