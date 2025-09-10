@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader, ConcatDataset
 import pickle
 
 from model import SocialModel
+# --- ★★★ エラー修正箇所 ★★★ ---
+# SocialModelでは不要な'seq_collate'のインポートを削除しました
 from utils import TrajectoryDataset
 from grid import getSequenceGridMask
 
@@ -25,10 +27,13 @@ def bivariate_loss(V_pred, V_trgt):
     zx = (x - muX) / sigX
     zy = (y - muY) / sigY
     
-    exponent = - (zx**2 - 2*rho*zx*zy + zy**2) / (2 * (1 - rho**2))
-    log_pi_sig = torch.log(2 * torch.pi * sigX * sigY * torch.sqrt(1 - rho**2))
+    #  rhoが1または-1に近づくと不安定になるのを防ぐ
+    rho = torch.clamp(rho, -0.9999, 0.9999)
     
-    loss = (log_pi_sig + exponent).sum()
+    exponent = - (zx**2 - 2*rho*zx*zy + zy**2) / (2 * (1 - rho**2))
+    log_pi_sig_sqrt = torch.log(2 * torch.pi * sigX * sigY * torch.sqrt(1 - rho**2))
+    
+    loss = (log_pi_sig_sqrt + exponent).sum()
     return loss
 
 def train(epoch, model, loader, optimizer, args, device):
@@ -99,7 +104,6 @@ def main():
     device = torch.device("cuda" if args.use_cuda else "cpu")
     print(f"Using device: {device}")
 
-    # --- ★★★ ここからが修正箇所 ★★★ ---
     all_dataset_names = ['eth', 'hotel', 'univ', 'zara1', 'zara2']
     datasets_to_load = all_dataset_names if args.dataset == 'all' else [args.dataset]
     
@@ -109,16 +113,14 @@ def main():
         train_path = f'./datasets/{name}/train/'
         if os.path.exists(train_path):
             try:
-                # データセットを個別に読み込み、エラーが発生したらスキップ
                 dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='space')
                 if len(dset) > 0:
                     train_datasets.append(dset)
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
                 else:
                     print(f"  - Warning: Skipped {name} training data (no valid sequences found).")
-            except IndexError as e:
-                # IndexErrorが発生した場合、警告を出してスキップ
-                print(f"  - Error: Failed to load {name} training data due to an IndexError. Skipping.")
+            except (IndexError, ValueError) as e:
+                print(f"  - Error: Failed to load {name} training data due to a data format issue. Skipping.")
                 print(f"    (Details: {e})")
 
     if not train_datasets:
@@ -126,7 +128,6 @@ def main():
         return
 
     dset_train = ConcatDataset(train_datasets)
-    # --- ★★★ ここまでが修正箇所 ★★★ ---
     
     loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
     print(f"Total training sequences combined: {len(dset_train)}")
