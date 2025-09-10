@@ -34,8 +34,7 @@ def get_grid_mask(frame_data, neighborhood_size, grid_size):
     row_indices, col_indices = torch.meshgrid(valid_indices, valid_indices, indexing='ij')
     
     # ★★★ バグ修正箇所 ★★★
-    # Bool型のmask_nonanを.float()でFloat型に変換してから代入する
-    full_mask[row_indices, col_indices, :] = mask_nonan.float().permute(0,2,1)
+    # 不要な .permute() を削除し、.float()で型を合わせる
+    full_mask[row_indices, col_indices, :] = mask_nonan.float()
     
     return full_mask
-
