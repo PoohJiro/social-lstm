@@ -244,13 +244,14 @@ def main():
             val_path = f'./datasets/{dataset_name}/val/'
             
             if os.path.exists(train_path):
+                # norm_lap_matrパラメータを削除
                 train_datasets.append(
                     TrajectoryDataset(
                         train_path,
                         obs_len=obs_seq_len,
                         pred_len=pred_seq_len,
-                        skip=1,
-                        norm_lap_matr=True
+                        skip=1
+                        # norm_lap_matr=True を削除
                     )
                 )
                 print(f"  - Loaded {dataset_name} training data")
@@ -261,8 +262,8 @@ def main():
                         val_path,
                         obs_len=obs_seq_len,
                         pred_len=pred_seq_len,
-                        skip=1,
-                        norm_lap_matr=True
+                        skip=1
+                        # norm_lap_matr=True を削除
                     )
                 )
         
@@ -271,7 +272,6 @@ def main():
         dset_val = ConcatDataset(val_datasets) if val_datasets else val_datasets[0]
         print(f"Total training sequences: {len(dset_train)}")
         print(f"Total validation sequences: {len(dset_val)}")
-        
     else:
         # 特定のデータセットのみ
         data_set = f'./datasets/{args.dataset}/'
@@ -280,9 +280,17 @@ def main():
             data_set + 'train/',
             obs_len=obs_seq_len,
             pred_len=pred_seq_len,
-            skip=1,
-            norm_lap_matr=True
+            skip=1
+            # norm_lap_matr=True を削除
         )
+    
+    dset_val = TrajectoryDataset(
+        data_set + 'val/',
+        obs_len=obs_seq_len,
+        pred_len=pred_seq_len,
+        skip=1
+        # norm_lap_matr=True を削除
+    )
         
         dset_val = TrajectoryDataset(
             data_set + 'val/',
