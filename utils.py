@@ -102,14 +102,15 @@ class TrajectoryDataset(Dataset):
         obs_traj_abs = torch.from_numpy(abs_seq[:, :self.obs_len, :]).float()
         pred_traj_abs = torch.from_numpy(abs_seq[:, self.obs_len:, :]).float()
         obs_traj_rel = torch.from_numpy(rel_seq[:, :self.obs_len, :]).float()
+        pred_traj_rel = torch.from_numpy(rel_seq[:, self.obs_len:, :]).float()
         
-        return obs_traj_abs, pred_traj_abs, obs_traj_rel
+        return obs_traj_abs, pred_traj_abs, obs_traj_rel, pred_traj_rel
 
 def seq_collate(data):
     """
     Custom collate function for DataLoader to handle variable-sized sequences.
     """
-    obs_traj_list, pred_traj_list, obs_traj_rel_list = zip(*data)
+    (obs_traj_list, pred_traj_list, obs_traj_rel_list, pred_traj_rel_list) = zip(*data)
     
     _len = [seq.size(0) for seq in obs_traj_list]
     cum_start_idx = [0] + np.cumsum(_len).tolist()
@@ -118,10 +119,7 @@ def seq_collate(data):
     obs_traj = torch.cat(obs_traj_list, dim=0).permute(1, 0, 2)
     pred_traj = torch.cat(pred_traj_list, dim=0).permute(1, 0, 2)
     obs_traj_rel = torch.cat(obs_traj_rel_list, dim=0).permute(1, 0, 2)
-    
-    pred_traj_rel = torch.zeros_like(pred_traj)
-    pred_traj_rel[0, :, :] = pred_traj[0, :, :] - obs_traj[-1, :, :]
-    pred_traj_rel[1:, :, :] = pred_traj[1:, :, :] - pred_traj[:-1, :, :]
+    pred_traj_rel = torch.cat(pred_traj_rel_list, dim=0).permute(1, 0, 2)
     
     seq_start_end = torch.LongTensor(seq_start_end)
     loss_mask = torch.ones(pred_traj.size(1), pred_traj.size(0)).permute(1, 0)
