@@ -16,7 +16,6 @@ def read_file(_path, delim='\t'):
     return np.asarray(data)
 
 class TrajectoryDataset(Dataset):
-    """データセットを読み込み、シーケンスに分割するためのクラス"""
     def __init__(self, data_dir, obs_len=8, pred_len=12, skip=1, min_ped=1, delim='\t'):
         super(TrajectoryDataset, self).__init__()
         self.data_dir = data_dir
@@ -43,7 +42,7 @@ class TrajectoryDataset(Dataset):
                 curr_seq_abs = np.zeros((len(peds_in_curr_seq), self.seq_len, 2))
                 num_peds_considered = 0
                 
-                for _, ped_id in enumerate(peds_in_curr_seq):
+                for ped_idx, ped_id in enumerate(peds_in_curr_seq):
                     curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
                     if len(curr_ped_seq) != self.seq_len:
                         continue
@@ -63,7 +62,6 @@ class TrajectoryDataset(Dataset):
     def __getitem__(self, index):
         abs_seq = self.seq_list_abs[index]
         
-        # 相対座標（速度）を計算
         rel_seq = np.zeros_like(abs_seq)
         rel_seq[:, 1:, :] = abs_seq[:, 1:, :] - abs_seq[:, :-1, :]
         
@@ -74,7 +72,6 @@ class TrajectoryDataset(Dataset):
         return obs_traj_abs, pred_traj_abs, obs_traj_rel
 
 def seq_collate(data):
-    """バッチ内の可変長の歩行者数をパディングして揃えるための関数"""
     (obs_abs_list, pred_abs_list, obs_rel_list) = zip(*data)
 
     max_peds = max([obs.shape[0] for obs in obs_abs_list])
