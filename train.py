@@ -1,28 +1,19 @@
-# train.py (全trainデータで学習し、指定したvalデータで検証する最終版)
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset
-import numpy as np
 import argparse
 import os
 
-# 以下のファイルが同じディレクトリにあることを確認してください
+# これまで作成した、書き換え済みのヘルパーファイルをインポート
 from utils import TrajectoryDataset, seq_collate
 from model import SocialModel
 from grid import get_grid_mask
+from metrics import bivariate_loss, sample_from_bivariate_gaussian, calculate_ade_fde
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def rel_to_abs(rel_traj, start_pos):
-    """
-    相対座標の軌跡を絶対座標に変換するヘルパー関数
-    Args:
-        rel_traj (torch.Tensor): 相対座標の軌跡 (batch, pred_len, num_peds, 2)
-        start_pos (torch.Tensor): 各軌跡の開始地点となる絶対座標 (batch, num_peds, 2)
-    Returns:
-        torch.Tensor: 絶対座標に変換された軌跡
-    """
+    """相対座標を絶対座標に変換する"""
     # (batch, pred_len, num_peds, 2) -> (batch, num_peds, pred_len, 2)
     rel_traj = rel_traj.permute(0, 2, 1, 3)
     abs_traj = torch.zeros_like(rel_traj)
@@ -37,7 +28,6 @@ def train_epoch(model, loader_train, optimizer, args):
     model.train()
     epoch_loss = 0
     for batch in loader_train:
-        # DataLoaderからの出力を受け取る
         obs_abs, pred_gt_abs, obs_rel = [t.to(device) for t in batch]
         
         # 正解データとなる相対座標を計算
@@ -54,22 +44,26 @@ def train_epoch(model, loader_train, optimizer, args):
         grids = torch.cat(grids, dim=1)
 
         optimizer.zero_grad()
-        pred_fake_rel = model(obs_rel, grids)
+        # モデルは5次元のパラメータを返す
+        pred_params = model(obs_rel, grids)
         
-        # NaN（パディングされた歩行者）を除外してロスを計算
-        mask = ~torch.isnan(pred_gt_rel)
-        if not mask.any(): continue # バッチ内に有効なデータがない場合はスキップ
-        
-        loss = nn.MSELoss()(pred_fake_rel[mask], pred_gt_rel[mask])
+        # 論文の損失関数（二変量ガウス分布の負の対数尤度）を使用
+        loss = bivariate_loss(pred_params, pred_gt_rel)
+        if torch.isnan(loss) or loss.item() == 0: continue
         
         loss.backward()
+        
+        # 元のコードにあった勾配クリッピングを適用
+        if args.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            
         optimizer.step()
         epoch_loss += loss.item()
 
-    return epoch_loss / len(loader_train)
+    return epoch_loss / len(loader_train) if len(loader_train) > 0 else 0
 
 def val_epoch(model, loader_val, args):
-    """1エポック分の検証 (ADE/FDE計算) を行う"""
+    """1エポック分の検証を行う"""
     model.eval()
     total_ade, total_fde = 0, 0
     with torch.no_grad():
@@ -83,44 +77,37 @@ def val_epoch(model, loader_val, args):
                 grids.append(torch.stack(batch_grids, dim=0).unsqueeze(1))
             grids = torch.cat(grids, dim=1)
             
-            pred_fake_rel = model(obs_rel, grids)
-            # 予測された相対座標を、観測の最後の絶対座標を起点に絶対座標へ変換
+            pred_params = model(obs_rel, grids)
+            # 評価のために、予測分布から1点をサンプリング
+            pred_fake_rel = sample_from_bivariate_gaussian(pred_params)
             pred_fake_abs = rel_to_abs(pred_fake_rel, obs_abs[:, -1])
             
-            # NaNを除外してADE/FDEを計算
-            mask = ~torch.isnan(pred_gt_abs[:, :, :, 0])
-            if not mask.any(): continue
-            
-            ade = torch.mean(torch.norm(pred_gt_abs[mask] - pred_fake_abs[mask], p=2, dim=-1))
-            
-            final_mask = ~torch.isnan(pred_gt_abs[:, -1, :, 0])
-            if not final_mask.any(): continue
-            
-            fde = torch.mean(torch.norm(pred_gt_abs[:, -1][final_mask] - pred_fake_abs[:, -1][final_mask], p=2, dim=-1))
+            ade, fde = calculate_ade_fde(pred_fake_abs, pred_gt_abs)
+            if ade > 0: total_ade += ade
+            if fde > 0: total_fde += fde
 
-            total_ade += ade.item()
-            total_fde += fde.item()
-
-    avg_ade = total_ade / len(loader_val)
-    avg_fde = total_fde / len(loader_val)
+    avg_ade = total_ade / len(loader_val) if len(loader_val) > 0 else 0
+    avg_fde = total_fde / len(loader_val) if len(loader_val) > 0 else 0
     return avg_ade, avg_fde
 
 def main():
     parser = argparse.ArgumentParser()
-    # データ関連の引数
+    # 元のコードの引数を、現在の構造に合わせて整理
+    # データ関連
     parser.add_argument('--data_path', default='./datasets', help='Path to dataset directory')
-    parser.add_argument('--dataset_val', default='eth', help='Dataset to use for validation (eth, hotel, zara1, zara2, univ)')
+    parser.add_argument('--dataset_val', default='eth', help='Dataset to use for validation')
     parser.add_argument('--obs_len', type=int, default=8)
     parser.add_argument('--pred_len', type=int, default=12)
 
-    # 学習関連の引数
+    # 学習関連
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--grad_clip', type=float, default=10.0, help='Gradient clipping')
 
-    # モデル関連の引数
+    # モデル関連
     parser.add_argument('--input_size', type=int, default=2)
-    parser.add_argument('--output_size', type=int, default=2)
+    parser.add_argument('--output_size', type=int, default=5, help='mux, muy, sx, sy, corr')
     parser.add_argument('--embedding_size', type=int, default=64)
     parser.add_argument('--rnn_size', type=int, default=128)
     parser.add_argument('--neighborhood_size', type=float, default=32.0)
@@ -129,18 +116,13 @@ def main():
 
     # --- 1. データの準備 ---
     all_dataset_names = ['eth', 'hotel', 'zara1', 'zara2', 'univ']
-    
-    # 全ての'train'フォルダのパスリストを作成
     train_paths = [os.path.join(args.data_path, name, 'train') for name in all_dataset_names]
-    # 各パスからTrajectoryDatasetオブジェクトを作成
     train_datasets = [TrajectoryDataset(path, obs_len=args.obs_len, pred_len=args.pred_len) for path in train_paths]
     
-    # 全ての学習データセットを一つに結合
     print(f"--- Combining {len(train_datasets)} training datasets ---")
     concat_train_dataset = ConcatDataset(train_datasets)
     loader_train = DataLoader(concat_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
     
-    # --dataset_valで指定された'val'フォルダから検証用DataLoaderを作成
     val_path = os.path.join(args.data_path, args.dataset_val, 'val')
     print(f"--- Validating on: {val_path} ---")
     dset_val = TrajectoryDataset(val_path, obs_len=args.obs_len, pred_len=args.pred_len)
@@ -148,7 +130,8 @@ def main():
     
     # --- 2. モデルとオプティマイザの準備 ---
     model = SocialModel(args).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # 元のコードに合わせてAdagradを使用
+    optimizer = optim.Adagrad(model.parameters(), lr=args.lr)
     
     # --- 3. 学習と検証のループ ---
     best_ade = float('inf')
@@ -158,7 +141,6 @@ def main():
         val_ade, val_fde = val_epoch(model, loader_val, args)
         print(f"Epoch {epoch+1}/{args.num_epochs} -> Train Loss: {train_loss:.4f}, Val ADE: {val_ade:.4f}, Val FDE: {val_fde:.4f}")
 
-        # 最良のADEを記録したモデルを保存
         if val_ade < best_ade:
             best_ade = val_ade
             print(f"****** Best Val ADE so far: {best_ade:.4f}. Saving model... ******")
