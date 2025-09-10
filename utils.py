@@ -63,8 +63,6 @@ class TrajectoryDataset(Dataset):
                 peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
                 curr_seq_rel = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
                 curr_seq = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
-                # ★★★ エラー修正箇所 ★★★
-                # 'p_in_curr_seq' を 'peds_in_curr_seq' に修正しました
                 curr_loss_mask = np.zeros((self.seq_len, len(peds_in_curr_seq)))
                 num_peds_considered = 0
                 _non_linear_ped = []
@@ -85,7 +83,9 @@ class TrajectoryDataset(Dataset):
                     rel_curr_ped_seq[1:, :] = curr_ped_seq[1:, :] - curr_ped_seq[:-1, :]
                     curr_seq_rel[:self.seq_len, _idx, :] = rel_curr_ped_seq
 
-                    is_non_linear = poly_fit(curr_ped_seq, self.pred_len, self.threshold)
+                    # ★★★ エラー修正箇所 ★★★
+                    # poly_fit関数に渡す軌道データを観測部分(obs_len)に限定し、長さも合わせました
+                    is_non_linear = poly_fit(curr_ped_seq[:self.obs_len], self.obs_len, self.threshold)
                     _non_linear_ped.append(is_non_linear)
                     curr_loss_mask[:self.seq_len, _idx] = 1
                     num_peds_considered += 1
