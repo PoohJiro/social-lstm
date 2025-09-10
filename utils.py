@@ -94,5 +94,44 @@ class TrajectoryDataset(Dataset):
         
         return obs_traj_abs, pred_traj_abs, obs_traj_rel
 
-
-
+    def seq_collate(data):
+        """
+        DataLoaderのためのカスタムcollate関数
+        バッチ内の可変長データを処理する
+        """
+        obs_traj_list, pred_traj_list, obs_traj_rel_list = zip(*data)
+        
+        # 各シーケンスの歩行者数を取得
+        _len = [seq.size(0) for seq in obs_traj_list]
+        
+        # バッチ内の累積インデックスを計算
+        cum_start_idx = [0] + np.cumsum(_len).tolist()
+        seq_start_end = [[start, end] 
+                         for start, end in zip(cum_start_idx, cum_start_idx[1:])]
+        
+        # テンソルを結合
+        obs_traj = torch.cat(obs_traj_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
+        pred_traj = torch.cat(pred_traj_list, dim=0).permute(1, 0, 2)  # (pred_len, total_peds, 2)
+        obs_traj_rel = torch.cat(obs_traj_rel_list, dim=0).permute(1, 0, 2)  # (obs_len, total_peds, 2)
+        
+        # 相対座標の予測軌道を計算
+        pred_traj_rel = torch.zeros_like(pred_traj)
+        pred_traj_rel[0] = pred_traj[0] - obs_traj[-1]
+        pred_traj_rel[1:] = pred_traj[1:] - pred_traj[:-1]
+        
+        # seq_start_endをテンソルに変換
+        seq_start_end = torch.LongTensor(seq_start_end)
+        
+        # 損失マスクを作成（全て1で初期化）
+        loss_mask = torch.ones(pred_traj.size(0), pred_traj.size(1))
+        
+        # 非線形歩行者のマスク（今回は全て0で初期化）
+        non_linear_ped = torch.zeros(pred_traj.size(1))
+        
+        out = [
+            obs_traj, pred_traj, obs_traj_rel, pred_traj_rel,
+            non_linear_ped, loss_mask, seq_start_end
+        ]
+        
+        return tuple(out)
+    
