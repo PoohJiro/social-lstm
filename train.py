@@ -1,12 +1,11 @@
-# train.py (train/valフォルダ方式に対応した最終版)
+# train.py (全trainデータで学習し、指定したvalデータで評価する最終版)
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import argparse
 import os
-import pickle
 from utils import TrajectoryDataset, seq_collate
 from model import SocialModel
 from grid import get_grid_mask
@@ -27,10 +26,13 @@ def train_epoch(epoch, model, loader_train, optimizer, args):
     model.train()
     epoch_loss = 0
     for batch in loader_train:
-        obs_abs, _, obs_rel = [t.to(device) for t in batch]
+        # DataLoaderの出力: obs_abs, pred_abs, obs_rel
+        obs_abs, pred_abs, obs_rel = [t.to(device) for t in batch]
         
-        pred_gt_abs = obs_abs[:, 1:, :, :] # 正解の絶対座標は観測の1フレーム後から
-        pred_gt_rel = pred_gt_abs - obs_abs[:, :-1, :, :] # 正解の相対座標
+        # 正解の相対座標を計算
+        pred_gt_rel = torch.zeros_like(pred_abs)
+        pred_gt_rel[:, 0, :, :] = pred_abs[:, 0, :, :] - obs_abs[:, -1, :, :]
+        pred_gt_rel[:, 1:, :, :] = pred_abs[:, 1:, :, :] - pred_abs[:, :-1, :, :]
         
         grids = []
         for t in range(args.obs_len):
@@ -51,7 +53,6 @@ def train_epoch(epoch, model, loader_train, optimizer, args):
 
     avg_loss = epoch_loss / len(loader_train)
     print(f"TRAIN:\t Epoch: {epoch}\t Loss: {avg_loss:.4f}")
-    return avg_loss
 
 def test_epoch(epoch, model, loader_val, args):
     """1エポック分の評価"""
@@ -67,18 +68,16 @@ def test_epoch(epoch, model, loader_val, args):
                 batch_grids = [get_grid_mask(frame, args.neighborhood_size, args.grid_size) for frame in frame_data]
                 grids.append(torch.stack(batch_grids, dim=0).unsqueeze(1))
             grids = torch.cat(grids, dim=1)
-
+            
             pred_fake_rel = model(obs_rel, grids)
             pred_fake_abs = rel_to_abs(pred_fake_rel, obs_abs[:, -1])
-
+            
             mask = ~torch.isnan(pred_gt_abs[:, :, :, 0])
             if not mask.any(): continue
-            
             ade = torch.mean(torch.norm(pred_gt_abs[mask] - pred_fake_abs[mask], dim=-1))
             
             final_mask = ~torch.isnan(pred_gt_abs[:, -1, :, 0])
             if not final_mask.any(): continue
-            
             fde = torch.mean(torch.norm(pred_gt_abs[:, -1][final_mask] - pred_fake_abs[:, -1][final_mask], dim=-1))
 
             total_ade += ade.item()
@@ -92,13 +91,12 @@ def test_epoch(epoch, model, loader_val, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', default='./datasets', help='Path to dataset directory')
-    parser.add_argument('--dataset', default='eth', help='Dataset name (eth, hotel, zara01, zara02, univ)')
+    parser.add_argument('--dataset_val', default='eth', help='Dataset to use for validation (eth, hotel, zara01, zara02, univ)')
     parser.add_argument('--obs_len', type=int, default=8)
     parser.add_argument('--pred_len', type=int, default=12)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--tag', default='social_lstm_tag', help='Tag for model checkpoint')
     parser.add_argument('--input_size', type=int, default=2)
     parser.add_argument('--output_size', type=int, default=2)
     parser.add_argument('--embedding_size', type=int, default=64)
@@ -107,29 +105,31 @@ def main():
     parser.add_argument('--grid_size', type=int, default=4)
     args = parser.parse_args()
 
-    print('*' * 30)
-    print("Training initiating....")
-    print(args)
-
-    # Data prep
-    train_path = os.path.join(args.data_path, args.dataset, 'train')
-    val_path = os.path.join(args.data_path, args.dataset, 'val')
+    # --- Data prep ---
+    all_datasets = ['eth', 'hotel', 'zara01', 'zara02', 'univ']
     
-    dset_train = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len)
-    loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
+    # 全ての'train'フォルダのパスリストを作成
+    train_paths = [os.path.join(args.data_path, name, 'train') for name in all_datasets]
+    # 各パスからTrajectoryDatasetオブジェクトを作成
+    train_datasets = [TrajectoryDataset(path, obs_len=args.obs_len, pred_len=args.pred_len) for path in train_paths]
+    # 全ての学習データセットを一つに結合
+    concat_train_dataset = ConcatDataset(train_datasets)
     
+    # 結合したデータセットから学習用DataLoaderを作成
+    loader_train = DataLoader(concat_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=seq_collate)
+    
+    # --dataset_valで指定された'val'フォルダから評価用DataLoaderを作成
+    val_path = os.path.join(args.data_path, args.dataset_val, 'val')
     dset_val = TrajectoryDataset(val_path, obs_len=args.obs_len, pred_len=args.pred_len)
     loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=seq_collate)
 
-    # Model
+    print(f"--- Training on all 'train' folders ---")
+    print(f"--- Validating on: {args.dataset_val}/val ---")
+
+    # --- Model, Optimizer, and Training Loop ---
     model = SocialModel(args).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
-    checkpoint_dir = './checkpoint/' + args.tag + '/'
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-
-    # Training
     best_ade = float('inf')
     for epoch in range(args.num_epochs):
         train_epoch(epoch, model, loader_train, optimizer, args)
@@ -138,7 +138,7 @@ def main():
         if val_ade < best_ade:
             best_ade = val_ade
             print(f"Saving best model with ADE: {best_ade:.4f}")
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'val_best_{args.dataset}.pth'))
+            torch.save(model.state_dict(), f'social_lstm_all_train_{args.dataset_val}_val_best.pth')
 
 if __name__ == '__main__':
     main()
