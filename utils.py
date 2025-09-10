@@ -13,7 +13,6 @@ def read_file(_path, delim='\t'):
     with open(_path, 'r') as f:
         for line in f:
             line = line.strip().split(delim)
-            # 空行や不正な行をスキップ
             if not line or len(line) < 4:
                 continue
             line = [float(i) for i in line]
@@ -64,7 +63,7 @@ class TrajectoryDataset(Dataset):
                 peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
                 curr_seq_rel = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
                 curr_seq = np.zeros((self.seq_len, len(peds_in_curr_seq), 2))
-                curr_loss_mask = np.zeros((self.seq_len, len(peds_in_curr_seq)))
+                curr_loss_mask = np.zeros((self.seq_len, len(p_in_curr_seq)))
                 num_peds_considered = 0
                 _non_linear_ped = []
                 
@@ -76,16 +75,18 @@ class TrajectoryDataset(Dataset):
                     if pad_end - pad_front != self.seq_len:
                         continue
 
-                    curr_ped_seq = np.transpose(curr_ped_seq[:, 2:])
+                    # ★★★ エラー修正箇所 ★★★
+                    # 不要なnp.transpose()を削除し、正しい形状(seq_len, 2)を維持します
+                    curr_ped_seq = curr_ped_seq[:, 2:]
                     _idx = num_peds_considered
                     curr_seq[:self.seq_len, _idx, :] = curr_ped_seq
                     
-                    if curr_ped_seq.shape[1] > 1:
-                        rel_curr_ped_seq = np.zeros_like(curr_ped_seq)
-                        rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
-                        curr_seq_rel[:self.seq_len, _idx, :] = rel_curr_ped_seq
+                    # 相対座標の計算は転置が不要になりました
+                    rel_curr_ped_seq = np.zeros_like(curr_ped_seq)
+                    rel_curr_ped_seq[1:, :] = curr_ped_seq[1:, :] - curr_ped_seq[:-1, :]
+                    curr_seq_rel[:self.seq_len, _idx, :] = rel_curr_ped_seq
 
-                    is_non_linear = poly_fit(curr_ped_seq.T, self.pred_len, self.threshold)
+                    is_non_linear = poly_fit(curr_ped_seq, self.pred_len, self.threshold)
                     _non_linear_ped.append(is_non_linear)
                     curr_loss_mask[:self.seq_len, _idx] = 1
                     num_peds_considered += 1
