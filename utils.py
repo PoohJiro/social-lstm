@@ -1,4 +1,4 @@
-import os
+mport os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -95,4 +95,6 @@ def seq_collate(data):
         obs_traj_rel[i, :num_peds, :, :] = obs_rel
 
     return obs_traj_abs.permute(0, 2, 1, 3), pred_traj_abs.permute(0, 2, 1, 3), obs_traj_rel.permute(0, 2, 1, 3)
+
+
 
