@@ -1,10 +1,10 @@
-# utils.py
 import os
 import torch
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 def read_file(_path, delim='\t'):
+    """指定されたパスからデータを読み込むヘルパー関数"""
     data = []
     with open(_path, 'r') as f:
         for line in f:
@@ -14,6 +14,7 @@ def read_file(_path, delim='\t'):
     return np.asarray(data)
 
 class TrajectoryDataset(Dataset):
+    """データセットを読み込み、シーケンスに分割するためのクラス"""
     def __init__(self, data_dir, obs_len=8, pred_len=12, skip=1, min_ped=1, delim='\t'):
         super(TrajectoryDataset, self).__init__()
         self.data_dir = data_dir
@@ -26,12 +27,11 @@ class TrajectoryDataset(Dataset):
         # ディレクトリ内の全ての.txtファイルを読み込む
         all_files = [os.path.join(self.data_dir, path) for path in os.listdir(self.data_dir) if path.endswith('.txt')]
         
+        # 1つのデータセットとして全データを結合
         all_data = []
         for path in all_files:
             data = read_file(path, delim)
             all_data.append(data)
-        
-        # 読み込んだ全データを結合
         cumulative_data = np.concatenate(all_data, axis=0)
         
         seq_list_abs = []
@@ -65,6 +65,7 @@ class TrajectoryDataset(Dataset):
 
     def __getitem__(self, index):
         abs_seq = self.seq_list_abs[index]
+        
         rel_seq = np.zeros_like(abs_seq)
         rel_seq[:, 1:, :] = abs_seq[:, 1:, :] - abs_seq[:, :-1, :]
         
@@ -75,6 +76,7 @@ class TrajectoryDataset(Dataset):
         return obs_traj_abs, pred_traj_abs, obs_traj_rel
 
 def seq_collate(data):
+    """バッチ内の可変長の歩行者数をパディングして揃えるための関数"""
     (obs_abs_list, pred_abs_list, obs_rel_list) = zip(*data)
 
     max_peds = max([obs.shape[0] for obs in obs_abs_list])
@@ -93,3 +95,4 @@ def seq_collate(data):
         obs_traj_rel[i, :num_peds, :, :] = obs_rel
 
     return obs_traj_abs.permute(0, 2, 1, 3), pred_traj_abs.permute(0, 2, 1, 3), obs_traj_rel.permute(0, 2, 1, 3)
+
