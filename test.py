@@ -6,8 +6,11 @@ import pickle
 
 from model import SocialModel
 from utils import TrajectoryDataset
-from grid import getSequenceGridMask
+# --- ★★★ エラー修正箇所 ★★★ ---
+# 高速化されたgrid.pyから正しい関数名をインポートします
+from grid import get_grid_mask_vectorized as getSequenceGridMask
 import torch.distributions.multivariate_normal as torchdist
+import copy
 
 def ade_fde(pred_traj, true_traj):
     """
@@ -45,10 +48,8 @@ def test(model, loader, args, device, k_steps=20):
             for _ in range(k_steps):
                 pred_traj_fake_rel = torch.zeros(args.pred_len, num_peds, 2).to(device)
                 
-                grids_obs = []
-                for t in range(args.obs_len):
-                    grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size, args.use_cuda)
-                    grids_obs.append(grid)
+                # 観測期間のグリッドを一度に計算
+                grids_obs = getSequenceGridMask(obs_traj, args.neighborhood_size, args.grid_size, args.use_cuda)
                 
                 hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
                 cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -61,7 +62,8 @@ def test(model, loader, args, device, k_steps=20):
                 last_pos_rel = obs_traj_rel[-1]
 
                 for t in range(args.pred_len):
-                    grid_pred = [getSequenceGridMask(last_pos_abs, args.neighborhood_size, args.grid_size, args.use_cuda)]
+                    # 1フレーム分のグリッドを計算
+                    grid_pred = getSequenceGridMask(last_pos_abs.unsqueeze(0), args.neighborhood_size, args.grid_size, args.use_cuda)
                     peds_list_pred = [torch.arange(num_peds).to(device)]
                     
                     output, hidden_states, cell_states = model(last_pos_rel.unsqueeze(0), grid_pred, hidden_states, cell_states, peds_list_pred, lookup)
