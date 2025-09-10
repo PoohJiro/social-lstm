@@ -9,7 +9,7 @@ import pickle
 
 from model import SocialModel
 # --- ★★★ エラー修正箇所 ★★★ ---
-# SocialModelでは不要な'seq_collate'のインポートを削除しました
+# ご提示のutils.pyには'seq_collate'が存在しないため、インポート文から削除しました
 from utils import TrajectoryDataset
 from grid import getSequenceGridMask
 
@@ -113,7 +113,8 @@ def main():
         train_path = f'./datasets/{name}/train/'
         if os.path.exists(train_path):
             try:
-                dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='space')
+                # ご提示のutils.pyに合わせてdelim='tab'に変更
+                dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
                 if len(dset) > 0:
                     train_datasets.append(dset)
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
