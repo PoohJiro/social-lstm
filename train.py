@@ -2,6 +2,8 @@ import importlib
 import sys
 
 # --- ★★★ キャッシュクリアのためのコード ★★★ ---
+# 開発中にローカルの.pyファイルを変更した場合、
+# このコードがPythonに強制的に最新版を再読み込みさせます。
 if 'utils' in sys.modules:
     importlib.reload(sys.modules['utils'])
 if 'model' in sys.modules:
@@ -21,8 +23,6 @@ import pickle
 
 from model import SocialModel
 from utils import TrajectoryDataset
-# --- ★★★ 高速化対応 ★★★ ---
-# 新しいベクトル化された関数をインポートします
 from grid import get_grid_mask_vectorized as getSequenceGridMask
 
 def bivariate_loss(V_pred, V_trgt):
@@ -66,8 +66,6 @@ def vald(model, loader, args, device):
             full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
             full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
             
-            # --- ★★★ 高速化対応 ★★★ ---
-            # ループを削除し、一度の呼び出しで全グリッドを計算
             grids = getSequenceGridMask(full_traj_abs_input, args.neighborhood_size, args.grid_size, args.use_cuda)
 
             hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -166,13 +164,12 @@ def main():
     for epoch in range(1, args.num_epochs + 1):
         epoch_total_loss = 0
         model.train()
-        print(f"--- Epoch {epoch}/{args.num_epochs} Train ---")
         
         optimizer.zero_grad()
         
         for dset_name, dset_train in train_datasets:
             loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
-            print(f"  Training on: {dset_name}")
+            print(f"--- Epoch {epoch}/{args.num_epochs} | Training on: {dset_name} ---")
             
             for batch_idx, batch in enumerate(loader_train):
                 (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
@@ -188,8 +185,6 @@ def main():
                 full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
                 full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
                 
-                # --- ★★★ 高速化対応 ★★★ ---
-                # ループを削除し、一度の呼び出しで全グリッドを計算
                 grids = getSequenceGridMask(full_traj_abs_input, args.neighborhood_size, args.grid_size, args.use_cuda)
 
                 hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
@@ -211,19 +206,21 @@ def main():
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
                     optimizer.step()
                     optimizer.zero_grad()
-
-        avg_train_loss = epoch_total_loss / total_train_samples if total_train_samples > 0 else 0
         
+        # --- ★★★ エポックごとのサマリー表示を改善 ★★★ ---
+        avg_train_loss = epoch_total_loss / total_train_samples if total_train_samples > 0 else 0
         val_loss = vald(model, loader_val, args, device)
         
-        print(f"Epoch {epoch} Summary | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}")
-
+        print("\n" + "="*20 + f" EPOCH {epoch} SUMMARY " + "="*20)
+        print(f"  Training Loss   : {avg_train_loss:.4f}")
+        print(f"  Validation Loss : {val_loss:.4f}")
+        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'val_best.pth'))
-            print(f"  *** New best model saved at epoch {epoch} ***")
-        
-        print("-" * 30)
+            print(f"  --> New best model saved!")
+        print("="*57 + "\n")
+
 
 if __name__ == '__main__':
     main()
