@@ -8,8 +8,6 @@ from torch.utils.data import DataLoader, ConcatDataset
 import pickle
 
 from model import SocialModel
-# --- ★★★ エラー修正箇所 ★★★ ---
-# ご提示のutils.pyには'seq_collate'が存在しないため、インポート文から削除しました
 from utils import TrajectoryDataset
 from grid import getSequenceGridMask
 
@@ -113,8 +111,14 @@ def main():
         train_path = f'./datasets/{name}/train/'
         if os.path.exists(train_path):
             try:
-                # ご提示のutils.pyに合わせてdelim='tab'に変更
-                dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
+                # ★★★ 不要な引数 'norm_lap_matr' を完全に削除しました ★★★
+                dset = TrajectoryDataset(
+                    train_path, 
+                    obs_len=args.obs_len, 
+                    pred_len=args.pred_len, 
+                    skip=1, 
+                    delim='\t' # utils.pyのデフォルトに合わせてタブ区切りを指定
+                )
                 if len(dset) > 0:
                     train_datasets.append(dset)
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
