@@ -25,7 +25,6 @@ def bivariate_loss(V_pred, V_trgt):
     zx = (x - muX) / sigX
     zy = (y - muY) / sigY
     
-    #  rhoが1または-1に近づくと不安定になるのを防ぐ
     rho = torch.clamp(rho, -0.9999, 0.9999)
     
     exponent = - (zx**2 - 2*rho*zx*zy + zy**2) / (2 * (1 - rho**2))
@@ -41,14 +40,17 @@ def train(epoch, model, loader, optimizer, args, device):
         (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
          loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
 
-        obs_traj = obs_traj.squeeze(0).permute(2, 0, 1).to(device)
-        obs_traj_rel = obs_traj_rel.squeeze(0).permute(2, 0, 1).to(device)
-        pred_traj_gt = pred_traj_gt.squeeze(0).permute(2, 0, 1).to(device)
-        pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).permute(2, 0, 1).to(device)
+        # ★★★ エラー修正箇所 ★★★
+        # 不要なpermuteを削除し、utils.pyからのデータをそのまま使います
+        obs_traj = obs_traj.squeeze(0).to(device)
+        obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
+        pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
+        pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).to(device)
         
         num_peds = obs_traj.size(1)
 
         grids = []
+        # ループはobs_trajの最初の次元（シーケンス長）を正しく反復します
         for t in range(args.obs_len):
             grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size, args.use_cuda)
             grids.append(grid)
@@ -111,14 +113,7 @@ def main():
         train_path = f'./datasets/{name}/train/'
         if os.path.exists(train_path):
             try:
-                # ★★★ 不要な引数 'norm_lap_matr' を完全に削除しました ★★★
-                dset = TrajectoryDataset(
-                    train_path, 
-                    obs_len=args.obs_len, 
-                    pred_len=args.pred_len, 
-                    skip=1, 
-                    delim='\t' # utils.pyのデフォルトに合わせてタブ区切りを指定
-                )
+                dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
                 if len(dset) > 0:
                     train_datasets.append(dset)
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
