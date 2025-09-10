@@ -1,7 +1,7 @@
 import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def get_grid_mask(frame_data, neighborhood_size, grid_size):
+def getSequenceGridMask(frame_data, neighborhood_size, grid_size):
     """
     各歩行者の近傍グリッドマスクを計算する。NaN（パディング）を考慮する。
     """
