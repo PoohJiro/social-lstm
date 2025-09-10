@@ -4,15 +4,16 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import argparse
 import pickle
 
-# Social-LSTMのモデルとユーティリティ
+# Social-LSTMのモデル
 from model import SocialModel
-from utils import TrajectoryDataset  # STGCNNのTrajectoryDatasetを使用
-from metrics import *  # STGCNNのmetricsを使用
+# Social-STGCNNのutils.pyをそのまま使用
+from utils import TrajectoryDataset
+from metrics import bivariate_loss
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -49,23 +50,9 @@ def train(epoch, model, loader_train, optimizer, args, device):
     for cnt, batch in enumerate(loader_train): 
         batch_count += 1
 
-        # STGCNNデータローダーの出力形式に対応
-        # batch = [tensor.to(device) for tensor in batch]
-        # STGCNNは10個の要素を返す
-        if len(batch) == 10:
-            obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
-            loss_mask, V_obs, A_obs, V_tr, A_tr = batch
-        else:
-            # 古い形式のデータローダーの場合
-            obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
-            loss_mask, seq_start_end = batch
-            # V_obs, A_obsを作成（ダミー）
-            batch_size = obs_traj.size(0)
-            num_peds = obs_traj.size(2)
-            V_obs = torch.zeros(batch_size, args.obs_seq_len, num_peds, 2)
-            A_obs = torch.zeros(batch_size, args.obs_seq_len, num_peds, num_peds)
-            V_tr = pred_traj_gt
-            A_tr = torch.zeros_like(A_obs)
+        # STGCNNのTrajectoryDatasetは10個の要素を返す
+        obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
+        loss_mask, V_obs, A_obs, V_tr, A_tr = batch
 
         # デバイスに移動
         obs_traj = obs_traj.to(device)
@@ -73,24 +60,21 @@ def train(epoch, model, loader_train, optimizer, args, device):
         obs_traj_rel = obs_traj_rel.to(device)
         pred_traj_gt_rel = pred_traj_gt_rel.to(device)
         loss_mask = loss_mask.to(device)
+        V_obs = V_obs.to(device)
+        V_tr = V_tr.to(device)
 
-        # Social-LSTM用の入力を準備
-        # obs_traj: (obs_len, batch, 2) の形式に変換
-        if obs_traj.dim() == 4:  # (batch, seq, node, feat)の場合
-            obs_traj = obs_traj.squeeze(0).permute(0, 2, 1)  # (seq, node, feat)
-            obs_traj_rel = obs_traj_rel.squeeze(0).permute(0, 2, 1)
-            pred_traj_gt = pred_traj_gt.squeeze(0).permute(0, 2, 1)
-            pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).permute(0, 2, 1)
+        # データ形式を調整 (batch, feat, seq) -> (seq, batch, feat)
+        obs_traj = obs_traj.squeeze(0).permute(2, 0, 1)  # (seq, peds, 2)
+        obs_traj_rel = obs_traj_rel.squeeze(0).permute(2, 0, 1)
+        pred_traj_gt = pred_traj_gt.squeeze(0).permute(2, 0, 1)
+        pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).permute(2, 0, 1)
         
-        num_peds = obs_traj.size(1) if obs_traj.dim() == 3 else obs_traj.size(0)
+        num_peds = obs_traj.size(1)
         
         # グリッドマスクを作成
         grids = []
         for t in range(args.obs_seq_len):
-            if obs_traj.dim() == 3:
-                grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size)
-            else:
-                grid = getSequenceGridMask(obs_traj, args.neighborhood_size, args.grid_size)
+            grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size)
             grids.append(grid.to(device))
         
         # 隠れ状態を初期化
@@ -98,7 +82,7 @@ def train(epoch, model, loader_train, optimizer, args, device):
         cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
         
         # ペデストリアンリストとルックアップを作成
-        peds_list = [torch.arange(num_peds) for _ in range(args.obs_seq_len + args.pred_seq_len)]
+        peds_list = [torch.arange(num_peds).to(device) for _ in range(args.obs_seq_len + args.pred_seq_len)]
         lookup = {i: i for i in range(num_peds)}
 
         optimizer.zero_grad()
@@ -125,13 +109,13 @@ def train(epoch, model, loader_train, optimizer, args, device):
                 
                 optimizer.step()
                 loss_batch += loss.item()
-                print('TRAIN:', '\t Epoch:', epoch, '\t Loss:', loss_batch/batch_count)
+                print(f'TRAIN:\t Epoch: {epoch}\t Loss: {loss_batch/batch_count:.4f}')
                 
         except Exception as e:
             print(f"Error in training batch: {e}")
             continue
             
-    return loss_batch/batch_count
+    return loss_batch/batch_count if batch_count > 0 else 0
 
 def vald(epoch, model, loader_val, args, device):
     model.eval()
@@ -146,12 +130,8 @@ def vald(epoch, model, loader_val, args, device):
             batch_count += 1
 
             # データを取得
-            if len(batch) == 10:
-                obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
-                loss_mask, V_obs, A_obs, V_tr, A_tr = batch
-            else:
-                obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
-                loss_mask, seq_start_end = batch
+            obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
+            loss_mask, V_obs, A_obs, V_tr, A_tr = batch
                 
             # デバイスに移動
             obs_traj = obs_traj.to(device)
@@ -160,28 +140,24 @@ def vald(epoch, model, loader_val, args, device):
             pred_traj_gt_rel = pred_traj_gt_rel.to(device)
             
             # データ形式を調整
-            if obs_traj.dim() == 4:
-                obs_traj = obs_traj.squeeze(0).permute(0, 2, 1)
-                obs_traj_rel = obs_traj_rel.squeeze(0).permute(0, 2, 1)
-                pred_traj_gt = pred_traj_gt.squeeze(0).permute(0, 2, 1)
-                pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).permute(0, 2, 1)
+            obs_traj = obs_traj.squeeze(0).permute(2, 0, 1)
+            obs_traj_rel = obs_traj_rel.squeeze(0).permute(2, 0, 1)
+            pred_traj_gt = pred_traj_gt.squeeze(0).permute(2, 0, 1)
+            pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).permute(2, 0, 1)
             
-            num_peds = obs_traj.size(1) if obs_traj.dim() == 3 else obs_traj.size(0)
+            num_peds = obs_traj.size(1)
             
             # グリッドマスクを作成
             grids = []
             for t in range(args.obs_seq_len):
-                if obs_traj.dim() == 3:
-                    grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size)
-                else:
-                    grid = getSequenceGridMask(obs_traj, args.neighborhood_size, args.grid_size)
+                grid = getSequenceGridMask(obs_traj[t], args.neighborhood_size, args.grid_size)
                 grids.append(grid.to(device))
             
             # 隠れ状態を初期化
             hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
             cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
             
-            peds_list = [torch.arange(num_peds) for _ in range(args.obs_seq_len + args.pred_seq_len)]
+            peds_list = [torch.arange(num_peds).to(device) for _ in range(args.obs_seq_len + args.pred_seq_len)]
             lookup = {i: i for i in range(num_peds)}
             
             try:
@@ -200,13 +176,13 @@ def vald(epoch, model, loader_val, args, device):
                     loss = loss / args.batch_size
                     is_fst_loss = True
                     loss_batch += loss.item()
-                    print('VALD:', '\t Epoch:', epoch, '\t Loss:', loss_batch/batch_count)
+                    print(f'VALD:\t Epoch: {epoch}\t Loss: {loss_batch/batch_count:.4f}')
                     
             except Exception as e:
                 print(f"Error in validation batch: {e}")
                 continue
                 
-    return loss_batch/batch_count
+    return loss_batch/batch_count if batch_count > 0 else 0
 
 def main():
     parser = argparse.ArgumentParser()
@@ -220,20 +196,20 @@ def main():
     parser.add_argument('--grid_size', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.0)
     
-    # Data specific parameters (STGCNNと同じ)
+    # Data specific parameters
     parser.add_argument('--obs_seq_len', type=int, default=8)
     parser.add_argument('--pred_seq_len', type=int, default=12)
-    parser.add_argument('--dataset', default='eth',
-                        help='eth,hotel,univ,zara1,zara2')    
+    parser.add_argument('--dataset', default='all',
+                        help='eth,hotel,univ,zara1,zara2,all')    
 
-    # Training specific parameters (STGCNNと同じ)
+    # Training specific parameters
     parser.add_argument('--batch_size', type=int, default=128,
                         help='minibatch size')
     parser.add_argument('--num_epochs', type=int, default=250,
                         help='number of epochs')  
-    parser.add_argument('--clip_grad', type=float, default=None,
+    parser.add_argument('--clip_grad', type=float, default=10.0,
                         help='gradient clipping')        
-    parser.add_argument('--lr', type=float, default=0.01,
+    parser.add_argument('--lr', type=float, default=0.003,
                         help='learning rate')
     parser.add_argument('--lr_sh_rate', type=int, default=150,
                         help='number of steps to drop the lr')  
@@ -250,49 +226,103 @@ def main():
     print("Training initiating....")
     print(args)
 
-    # Data prep (STGCNNと同じ形式)    
+    # Data prep
     obs_seq_len = args.obs_seq_len
     pred_seq_len = args.pred_seq_len
-    data_set = './datasets/' + args.dataset + '/'
-
-    # STGCNNのTrajectoryDatasetを使用
-    dset_train = TrajectoryDataset(
+    
+    # データセットの選択
+    all_dataset_names = ['eth', 'hotel', 'univ', 'zara1', 'zara2']
+    
+    if args.dataset == 'all':
+        # 全データセットで学習
+        train_datasets = []
+        val_datasets = []
+        
+        print("Loading all datasets for training...")
+        for dataset_name in all_dataset_names:
+            train_path = f'./datasets/{dataset_name}/train/'
+            val_path = f'./datasets/{dataset_name}/val/'
+            
+            if os.path.exists(train_path):
+                train_datasets.append(
+                    TrajectoryDataset(
+                        train_path,
+                        obs_len=obs_seq_len,
+                        pred_len=pred_seq_len,
+                        skip=1,
+                        norm_lap_matr=True
+                    )
+                )
+                print(f"  - Loaded {dataset_name} training data")
+            
+            if os.path.exists(val_path):
+                val_datasets.append(
+                    TrajectoryDataset(
+                        val_path,
+                        obs_len=obs_seq_len,
+                        pred_len=pred_seq_len,
+                        skip=1,
+                        norm_lap_matr=True
+                    )
+                )
+        
+        # 全データセットを結合
+        dset_train = ConcatDataset(train_datasets) if train_datasets else train_datasets[0]
+        dset_val = ConcatDataset(val_datasets) if val_datasets else val_datasets[0]
+        print(f"Total training sequences: {len(dset_train)}")
+        print(f"Total validation sequences: {len(dset_val)}")
+        
+    else:
+        # 特定のデータセットのみ
+        data_set = f'./datasets/{args.dataset}/'
+        
+        dset_train = TrajectoryDataset(
             data_set + 'train/',
             obs_len=obs_seq_len,
             pred_len=pred_seq_len,
             skip=1,
-            norm_lap_matr=True)  # STGCNNのパラメータ
-
-    loader_train = DataLoader(
-            dset_train,
-            batch_size=1,  # This is irrelative to the args batch size parameter
-            shuffle=True,
-            num_workers=0)
-
-    dset_val = TrajectoryDataset(
+            norm_lap_matr=True
+        )
+        
+        dset_val = TrajectoryDataset(
             data_set + 'val/',
             obs_len=obs_seq_len,
             pred_len=pred_seq_len,
             skip=1,
-            norm_lap_matr=True)
+            norm_lap_matr=True
+        )
+        
+        print(f"Dataset: {args.dataset}")
+        print(f"Training sequences: {len(dset_train)}")
+        print(f"Validation sequences: {len(dset_val)}")
+
+    # DataLoader作成
+    loader_train = DataLoader(
+        dset_train,
+        batch_size=1,  # STGCNNと同じく1固定
+        shuffle=True,
+        num_workers=0
+    )
 
     loader_val = DataLoader(
-            dset_val,
-            batch_size=1,  # This is irrelative to the args batch size parameter
-            shuffle=False,
-            num_workers=0)
+        dset_val,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0
+    )
 
     # Social-LSTMモデルを定義
     model = SocialModel(args).to(device)
+    print(f"Model initialized on {device}")
 
-    # Training settings (STGCNNと同じ)
-    optimizer = optim.SGD(model.parameters(), lr=args.lr)
+    # Optimizer設定
+    optimizer = optim.Adagrad(model.parameters(), lr=args.lr)  # Social-LSTMはAdagradを使用
 
     if args.use_lrschd:
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_sh_rate, gamma=0.2)
 
-    checkpoint_dir = './checkpoint/' + args.tag + '/'
-
+    # チェックポイントディレクトリ
+    checkpoint_dir = f'./checkpoint/{args.tag}/'
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
         
@@ -302,7 +332,7 @@ def main():
     print('Data and model loaded')
     print('Checkpoint dir:', checkpoint_dir)
 
-    # Training (STGCNNと同じ形式)
+    # Training
     metrics = {'train_loss': [], 'val_loss': []}
     constant_metrics = {'min_val_epoch': -1, 'min_val_loss': 9999999999999999}
 
@@ -317,28 +347,31 @@ def main():
         if args.use_lrschd:
             scheduler.step()
 
+        # ベストモデルの保存
         if metrics['val_loss'][-1] < constant_metrics['min_val_loss']:
             constant_metrics['min_val_loss'] = metrics['val_loss'][-1]
             constant_metrics['min_val_epoch'] = epoch
             torch.save(model.state_dict(), checkpoint_dir + 'val_best.pth')
+            print(f"  *** New best model saved at epoch {epoch} ***")
 
+        # エポック毎の結果表示
         print('*'*30)
-        print('Epoch:', args.tag, ":", epoch)
-        for k, v in metrics.items():
-            if len(v) > 0:
-                print(k, v[-1])
-
-        print(constant_metrics)
+        print(f'Epoch: {epoch}/{args.num_epochs}')
+        print(f'  Train Loss: {train_loss:.4f}')
+        print(f'  Val Loss: {val_loss:.4f}')
+        print(f'  Best Val Loss: {constant_metrics["min_val_loss"]:.4f} (Epoch {constant_metrics["min_val_epoch"]})')
         print('*'*30)
         
+        # メトリクスの保存
         with open(checkpoint_dir + 'metrics.pkl', 'wb') as fp:
             pickle.dump(metrics, fp)
         
         with open(checkpoint_dir + 'constant_metrics.pkl', 'wb') as fp:
             pickle.dump(constant_metrics, fp)
 
+    print("\nTraining completed!")
+    print(f"Best model saved at: {checkpoint_dir}val_best.pth")
+    print(f"Best validation loss: {constant_metrics['min_val_loss']:.4f}")
+
 if __name__ == '__main__':
-    # マルチプロセシング対応
-    import multiprocessing
-    multiprocessing.freeze_support()
     main()
