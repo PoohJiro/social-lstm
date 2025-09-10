@@ -7,7 +7,7 @@ import time
 
 # あなたの元のアルゴリズムファイルと、書き換えたデータローダー
 from model import SocialModel
-from utils import TrajectoryDataset, seq_collate
+#from utils import TrajectoryDataset, seq_collate
 from grid import getSequenceGridMask
 from helper import Gaussian2DLikelihood, get_mean_error, get_final_error, getCoef, sample_gaussian_2d
 
