@@ -36,11 +36,11 @@ def bivariate_loss(V_pred, V_trgt):
 def train(epoch, model, loader, optimizer, args, device):
     model.train()
     total_loss = 0
+    loader_len = len(loader)
     for batch_idx, batch in enumerate(loader):
         (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
          loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
 
-        # データをデバイスに移動し、不要なバッチ次元を削除
         obs_traj = obs_traj.squeeze(0).to(device)
         pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
         obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
@@ -48,13 +48,9 @@ def train(epoch, model, loader, optimizer, args, device):
         
         num_peds = obs_traj.size(1)
 
-        # --- ★★★ エラー修正箇所 (Teacher Forcing) ★★★ ---
-        # 1. 観測軌道と正解予測軌道を結合して、モデルへの入力を作成
-        #    モデルはt番目の入力からt+1番目を予測するため、最後の正解データは不要
         full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
         full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
         
-        # 2. 結合した軌道全体に対してグリッドマスクを準備
         grids = []
         for t in range(args.obs_len + args.pred_len - 1):
             grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
@@ -68,14 +64,10 @@ def train(epoch, model, loader, optimizer, args, device):
 
         optimizer.zero_grad()
         
-        # 3. モデルに結合した軌道を一度に渡し、全系列の出力を得る
         full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
         
-        # 4. モデルの出力から、予測に対応する部分だけを抽出
-        #    (観測期間の終わりから最後の予測まで)
         pred_outputs = full_outputs[args.obs_len-1:]
 
-        # 5. 抽出した予測と正解データで損失を計算
         loss = bivariate_loss(pred_outputs, pred_traj_gt_rel)
         total_loss += loss.item()
         
@@ -86,9 +78,53 @@ def train(epoch, model, loader, optimizer, args, device):
         
         optimizer.step()
 
+        # --- ★★★ 進捗表示機能 ★★★ ---
+        if (batch_idx + 1) % 100 == 0:
+            print(f'  Epoch {epoch} | Batch [{batch_idx + 1}/{loader_len}] | Loss: {loss.item() / num_peds:.4f}')
+
     avg_loss = total_loss / len(loader.dataset) if len(loader.dataset) > 0 else 0
-    print(f'Epoch: {epoch}, Train Loss: {avg_loss:.4f}')
     return avg_loss
+
+def vald(model, loader, args, device):
+    """検証ループ関数"""
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(loader):
+            (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
+             loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
+
+            obs_traj = obs_traj.squeeze(0).to(device)
+            pred_traj_gt = pred_traj_gt.squeeze(0).to(device)
+            obs_traj_rel = obs_traj_rel.squeeze(0).to(device)
+            pred_traj_gt_rel = pred_traj_gt_rel.squeeze(0).to(device)
+            
+            num_peds = obs_traj.size(1)
+
+            full_traj_rel_input = torch.cat((obs_traj_rel, pred_traj_gt_rel[:-1]), dim=0)
+            full_traj_abs_input = torch.cat((obs_traj, pred_traj_gt[:-1]), dim=0)
+            
+            grids = []
+            for t in range(args.obs_len + args.pred_len - 1):
+                grid = getSequenceGridMask(full_traj_abs_input[t], args.neighborhood_size, args.grid_size, args.use_cuda)
+                grids.append(grid)
+
+            hidden_states = torch.zeros(num_peds, args.rnn_size).to(device)
+            cell_states = torch.zeros(num_peds, args.rnn_size).to(device)
+            
+            peds_list = [torch.arange(num_peds).to(device) for _ in range(args.obs_len + args.pred_len)]
+            lookup = {i: i for i in range(num_peds)}
+            
+            full_outputs, _, _ = model(full_traj_rel_input, grids, hidden_states, cell_states, peds_list, lookup)
+            
+            pred_outputs = full_outputs[args.obs_len-1:]
+
+            loss = bivariate_loss(pred_outputs, pred_traj_gt_rel)
+            total_loss += loss.item()
+
+    avg_loss = total_loss / len(loader.dataset) if len(loader.dataset) > 0 else 0
+    return avg_loss
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -119,29 +155,43 @@ def main():
     datasets_to_load = all_dataset_names if args.dataset == 'all' else [args.dataset]
     
     train_datasets = []
+    val_datasets = []
     print("Loading datasets...")
     for name in datasets_to_load:
         train_path = f'./datasets/{name}/train/'
+        val_path = f'./datasets/{name}/val/'
+        
         if os.path.exists(train_path):
             try:
                 dset = TrajectoryDataset(train_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
                 if len(dset) > 0:
                     train_datasets.append(dset)
                     print(f"  - Successfully loaded {name} training data ({len(dset)} sequences)")
-                else:
-                    print(f"  - Warning: Skipped {name} training data (no valid sequences found).")
             except (IndexError, ValueError) as e:
-                print(f"  - Error: Failed to load {name} training data due to a data format issue. Skipping.")
-                print(f"    (Details: {e})")
+                print(f"  - Error loading {name} train data: {e}. Skipping.")
+
+        if os.path.exists(val_path):
+            try:
+                dset = TrajectoryDataset(val_path, obs_len=args.obs_len, pred_len=args.pred_len, skip=1, delim='\t')
+                if len(dset) > 0:
+                    val_datasets.append(dset)
+                    print(f"  - Successfully loaded {name} validation data ({len(dset)} sequences)")
+            except (IndexError, ValueError) as e:
+                print(f"  - Error loading {name} val data: {e}. Skipping.")
+
 
     if not train_datasets:
         print("No valid training data found. Exiting.")
         return
 
     dset_train = ConcatDataset(train_datasets)
+    dset_val = ConcatDataset(val_datasets)
     
     loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
-    print(f"Total training sequences combined: {len(dset_train)}")
+    loader_val = DataLoader(dset_val, batch_size=args.batch_size, shuffle=False)
+
+    print(f"Total training sequences: {len(dset_train)}")
+    print(f"Total validation sequences: {len(dset_val)}")
 
     model = SocialModel(args).to(device)
     optimizer = optim.Adagrad(model.parameters(), lr=args.lr)
@@ -150,13 +200,21 @@ def main():
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
+    best_val_loss = float('inf')
     print("******************************")
     print("Training initiating....")
     for epoch in range(1, args.num_epochs + 1):
-        train(epoch, model, loader_train, optimizer, args, device)
-        if epoch % 10 == 0:
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'model_{epoch}.pth'))
-            print(f"Model saved at epoch {epoch}")
+        train_loss = train(epoch, model, loader_train, optimizer, args, device)
+        val_loss = vald(model, loader_val, args, device)
+        
+        print(f"Epoch {epoch} Summary | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'val_best.pth'))
+            print(f"  *** New best model saved at epoch {epoch} ***")
+        
+        print("-" * 30)
 
 if __name__ == '__main__':
     main()
