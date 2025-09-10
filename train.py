@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset
 import pickle
+from tqdm import tqdm  # tqdmをインポート
 
 from model import SocialModel
 from utils import TrajectoryDataset
@@ -167,11 +168,15 @@ def main():
         
         optimizer.zero_grad()
         
+        print(f"--- Epoch {epoch}/{args.num_epochs} ---")
+        
         for dset_name, dset_train in train_datasets:
             loader_train = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True)
-            print(f"--- Epoch {epoch}/{args.num_epochs} | Training on: {dset_name} ---")
+            # --- ★★★ TQDM適用箇所 ★★★ ---
+            # データセットごとにプログレスバーを作成
+            progress_bar = tqdm(loader_train, desc=f"  Training on {dset_name.ljust(10)}")
             
-            for batch_idx, batch in enumerate(loader_train):
+            for batch_idx, batch in enumerate(progress_bar):
                 (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
                  loss_mask, V_obs, A_obs, V_tr, A_tr) = batch
 
@@ -206,20 +211,26 @@ def main():
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
                     optimizer.step()
                     optimizer.zero_grad()
-        
-        # --- ★★★ エポックごとのサマリー表示を改善 ★★★ ---
+                
+                # --- ★★★ プログレスバーの情報を更新 ★★★ ---
+                # 現在のバッチの損失をプログレスバーに表示
+                if num_peds > 0:
+                    progress_bar.set_postfix({'loss': (loss.item() * args.accumulation_steps / num_peds)})
+
         avg_train_loss = epoch_total_loss / total_train_samples if total_train_samples > 0 else 0
         val_loss = vald(model, loader_val, args, device)
         
-        print("\n" + "="*20 + f" EPOCH {epoch} SUMMARY " + "="*20)
-        print(f"  Training Loss   : {avg_train_loss:.4f}")
-        print(f"  Validation Loss : {val_loss:.4f}")
+        # --- ★★★ エポックごとのサマリー表示をtqdm.writeに変更 ★★★ ---
+        # プログレスバーを壊さずにメッセージを出力
+        tqdm.write("\n" + "="*20 + f" EPOCH {epoch} SUMMARY " + "="*20)
+        tqdm.write(f"  Training Loss   : {avg_train_loss:.4f}")
+        tqdm.write(f"  Validation Loss : {val_loss:.4f}")
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'val_best.pth'))
-            print(f"  --> New best model saved!")
-        print("="*57 + "\n")
+            tqdm.write(f"  --> New best model saved!")
+        tqdm.write("="*57 + "\n")
 
 
 if __name__ == '__main__':
